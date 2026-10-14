@@ -1,6 +1,6 @@
 # Retroamp
 
-A compact macOS music player by [namewithin](https://github.com/namewithin), with a Winamp 2-inspired interface. Plays local files and connects to your YouTube Music library.
+A compact macOS music player with a Winamp 2-inspired interface. Plays local files and connects to your YouTube Music library.
 
 ![Retroamp player — example spectrum](docs/images/player.png)
 
