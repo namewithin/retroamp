@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>Retroamp</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>mp3</string>
+				<string>m4a</string>
+				<string>aac</string>
+				<string>wav</string>
+				<string>wave</string>
+				<string>aiff</string>
+				<string>aif</string>
+				<string>flac</string>
+				<string>caf</string>
+			</array>
+			<key>CFBundleTypeName</key>
+			<string>Аудіофайли</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+		</dict>
+		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>wsz</string>
+			</array>
+			<key>CFBundleTypeName</key>
+			<string>Winamp 2 Classic Skin</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>local.retroamp.winamp2-skin</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleExecutable</key>
+	<string>Retroamp</string>
+	<key>CFBundleIconFile</key>
+	<string>Retroamp.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.retroamp.native</string>
+	<key>CFBundleName</key>
+	<string>Retroamp</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.8.0</string>
+	<key>CFBundleVersion</key>
+	<string>8</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Winamp 2 Classic Skin</string>
+			<key>UTTypeIdentifier</key>
+			<string>local.retroamp.winamp2-skin</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>wsz</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>
