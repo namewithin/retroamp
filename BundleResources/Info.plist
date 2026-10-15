@@ -54,11 +54,11 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.8.0</string>
+	<string>0.10.0</string>
 	<key>CFBundleVersion</key>
-	<string>8</string>
+	<string>15</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
+	<string>14.2</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>UTImportedTypeDeclarations</key>
@@ -81,5 +81,7 @@
 			</dict>
 		</dict>
 	</array>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Retroamp routes only its own WebKit music playback through its native equalizer and visualizer. It does not select other apps or the microphone.</string>
 </dict>
 </plist>

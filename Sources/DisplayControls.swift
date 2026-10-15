@@ -15,6 +15,7 @@ final class MarqueeState {
     private var travelWidth:CGFloat=0
     private var previousViewport:CGFloat=0
     func reset() {offset=0;wait=1.5;overflow=false;travelWidth=0}
+    var needsAnimation:Bool {overflow}
     func advance(_ delta:Double) {
         guard overflow else {return}
         if wait>0 {wait=max(0,wait-delta);return}

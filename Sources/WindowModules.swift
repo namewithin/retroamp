@@ -61,7 +61,7 @@ final class PlaylistPanel:NSView {
         owner.query.frame=NSRect(x:12,y:y,width:max(92,bounds.width-164),height:20)
         for (i,b) in owner.playlistButtons.enumerated() {b.frame=NSRect(x:bounds.width-146+CGFloat([0,68,102,126][i]),y:y,width:CGFloat([64,30,20,20][i]),height:20)}
     }
-    override func mouseDown(with event:NSEvent) {if convert(event.locationInWindow,from:nil).y<21 {window?.performDrag(with:event)}}
+    override func mouseDown(with event:NSEvent) {if convert(event.locationInWindow,from:nil).y<21 {if let w=window as? RetroWindow,let group=w.group {group.dragWindow(w,with:event)} else {window?.performDrag(with:event)}}}
     override func draggingEntered(_ sender:NSDraggingInfo)->NSDragOperation {owner?.draggingEntered(sender) ?? []}
     override func performDragOperation(_ sender:NSDraggingInfo)->Bool {owner?.performDragOperation(sender) ?? false}
     override func draw(_ dirtyRect:NSRect) {
@@ -86,13 +86,14 @@ final class PlaylistPanel:NSView {
         window=module(view,base:NSSize(width:360,height:146),title:"Retroamp — Плеєр",size:NSSize(width:320,height:130),key:"retroamp.main.v6")
         equalizerWindow=module(view.equalizerView,base:NSSize(width:360,height:140),title:"Retroamp — Еквалайзер",size:NSSize(width:320,height:124),key:"retroamp.eq.v6")
         playlistWindow=module(view.playlistView,base:nil,title:"Retroamp — Плейлист",size:NSSize(width:320,height:200),key:"retroamp.playlist.v6")
+        videoWindow=module(videoPanel,base:nil,title:"Retroamp — VIDEO",size:NSSize(width:480,height:318),key:"retroamp.video.v1");videoWindow.minSize=NSSize(width:320,height:220);videoWindow.maxSize=NSSize(width:1920,height:1200)
         arrangeWindows(nil)
-        for (w,key) in [(window!,"retroamp.main.v6"),(equalizerWindow!,"retroamp.eq.v6"),(playlistWindow!,"retroamp.playlist.v6")] {
+        for (w,key) in [(window!,"retroamp.main.v6"),(equalizerWindow!,"retroamp.eq.v6"),(playlistWindow!,"retroamp.playlist.v6"),(videoWindow!,"retroamp.video.v1")] {
             _=w.setFrameUsingName(key);w.setFrameAutosaveName(key)
             if let screen=NSScreen.screens.first(where:{$0.visibleFrame.intersects(w.frame)}),screen.visibleFrame.intersection(w.frame).width>=80,screen.visibleFrame.intersection(w.frame).height>=40 {} else {w.center()}
             w.contentView?.layoutSubtreeIfNeeded()
         }
-        windowGroup.configure(player:window,windows:[window,equalizerWindow,playlistWindow])
+        windowGroup.configure(player:window,windows:[window,equalizerWindow,playlistWindow,videoWindow])
     }
     func updatePinButton(_ enabled:Bool) {
         if let pin=view.subviews.compactMap({$0 as? MetalButton}).first(where:{$0.identifier?.rawValue=="pin"}) {pin.skinSelected=enabled;pin.setAccessibilityValue(enabled ? "Увімкнено" : "Вимкнено");pin.needsDisplay=true}
@@ -101,6 +102,7 @@ final class PlaylistPanel:NSView {
         guard equalizerWindow != nil,playlistWindow != nil else {return}
         if view.eqVisible {if !equalizerWindow.isVisible {equalizerWindow.makeKeyAndOrderFront(nil)}} else {equalizerWindow.orderOut(nil)}
         if view.playlistVisible {if !playlistWindow.isVisible {playlistWindow.makeKeyAndOrderFront(nil)}} else {playlistWindow.orderOut(nil)}
+        if videoVisible {if !videoWindow.isVisible {videoWindow.orderFront(nil)}} else {videoWindow.orderOut(nil)}
     }
     @objc func arrangeWindows(_ sender:Any?) {
         guard window != nil,equalizerWindow != nil,playlistWindow != nil else {return}
@@ -109,6 +111,7 @@ final class PlaylistPanel:NSView {
         window.setFrame(NSRect(x:x,y:top-130,width:320,height:130),display:true)
         equalizerWindow.setFrame(NSRect(x:x,y:top-130-4-124,width:320,height:124),display:true)
         playlistWindow.setFrame(NSRect(x:x,y:top-130-4-124-4-200,width:320,height:200),display:true)
+        videoWindow?.setFrame(NSRect(x:x+324,y:top-318,width:480,height:318),display:true)
     }
     var skinStorageURL:URL {FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("Retroamp",isDirectory:true).appendingPathComponent(Bundle.main.bundleIdentifier ?? "command-line",isDirectory:true).appendingPathComponent("active-skin.wsz")}
     @objc func openSkin(_ sender:Any?) {

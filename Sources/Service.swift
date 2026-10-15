@@ -66,21 +66,32 @@ struct SessionCredentials: Codable {
     }
 }
 
-enum KeychainSession {
+@MainActor enum KeychainSession {
     private static let query: [String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:"local.retroamp.native",kSecAttrAccount as String:"youtube-music-session"]
     private static let marker="google-session-executable.v4"
-    private static var executableID:String? {
-        guard let path=Bundle.main.executableURL,let data=try? Data(contentsOf:path) else {return nil}
-        return SHA256.hash(data:data).map {String(format:"%02x",$0)}.joined()
+    typealias Reader=@MainActor ([String:Any])->(OSStatus,Data?)
+    static func readItem(_ query:[String:Any])->(OSStatus,Data?) {
+        var result:CFTypeRef?;let status=SecItemCopyMatching(query as CFDictionary,&result)
+        return (status,result as? Data)
     }
-    static func load(allowInteraction:Bool=false) throws -> SessionCredentials? {
-        if !allowInteraction {guard let id=executableID,UserDefaults.standard.string(forKey:marker)==id else {return nil}}
+    static func load(allowInteraction:Bool=false,reader:Reader=readItem) throws -> SessionCredentials? {
+        return try loadItem(query,allowInteraction:allowInteraction,reader:reader)
+    }
+    static func loadItem(_ query:[String:Any],allowInteraction:Bool,reader:Reader=readItem) throws -> SessionCredentials? {
+        // Existing macOS file-based Keychain items ignore LAContext's UI policy.
+        // Serialize this process-wide legacy switch on MainActor and restore it after reading.
+        var previous:DarwinBoolean=false
+        let previousStatus=SecKeychainGetUserInteractionAllowed(&previous)
+        guard previousStatus==errSecSuccess else {throw MusicError.message("Не вдалося перевірити доступ до Keychain (\(previousStatus)).")}
+        let interactionStatus=SecKeychainSetUserInteractionAllowed(allowInteraction)
+        guard interactionStatus==errSecSuccess else {throw MusicError.message("Не вдалося налаштувати запит до Keychain (\(interactionStatus)).")}
+        defer {_=SecKeychainSetUserInteractionAllowed(previous.boolValue)}
         var q=query;q[kSecReturnData as String]=true;q[kSecMatchLimit as String]=kSecMatchLimitOne
         let context=LAContext();context.interactionNotAllowed = !allowInteraction;q[kSecUseAuthenticationContext as String]=context
-        var result:CFTypeRef?
-        let status=SecItemCopyMatching(q as CFDictionary,&result)
+        let (status,data)=reader(q)
         if status==errSecItemNotFound {return nil}
-        guard status==errSecSuccess,let data=result as? Data else {throw MusicError.message("Натисніть GOOGLE, щоб підключити акаунт до цієї версії Retroamp.")}
+        if status==errSecInteractionNotAllowed || status==errSecAuthFailed || status==errSecUserCanceled {throw SessionAccessError.authorizationRequired}
+        guard status==errSecSuccess,let data else {throw MusicError.message("Не вдалося прочитати сесію з Keychain (\(status)). Збережений вхід не видалено.")}
         return try JSONDecoder().decode(SessionCredentials.self,from:data)
     }
     static func save(_ credentials: SessionCredentials) throws {
@@ -91,7 +102,7 @@ enum KeychainSession {
             let added=SecItemAdd(q as CFDictionary,nil)
             guard added==errSecSuccess else {throw MusicError.message("Не вдалося зберегти сесію в Keychain (\(added)).")}
         } else if status != errSecSuccess {throw MusicError.message("Не вдалося оновити сесію в Keychain (\(status)).")}
-        if let id=executableID {UserDefaults.standard.set(id,forKey:marker)}
+        UserDefaults.standard.removeObject(forKey:marker)
     }
     static func delete() throws {
         let status=SecItemDelete(query as CFDictionary)
@@ -100,12 +111,17 @@ enum KeychainSession {
     }
 }
 
+enum SessionAccessError:LocalizedError {
+    case authorizationRequired
+    var errorDescription:String? {"Keychain потребує дозволу для цієї збірки. Натисніть GOOGLE → «Відновити збережений вхід» і дозвольте доступ у вікні macOS. Повторний вхід у Google не потрібен, якщо сесія ще чинна."}
+}
+
 enum MusicError: LocalizedError {
     case message(String)
     var errorDescription:String? {switch self {case .message(let message):return message}}
 }
 
-struct MusicItem: Equatable {
+struct MusicItem: Equatable,Codable {
     let id: String
     let title: String
     let subtitle: String
@@ -118,7 +134,43 @@ struct MusicItem: Equatable {
 }
 struct MusicPage {let items:[MusicItem];let continuation:String?}
 
+struct VideoRendition:Sendable {
+    struct Segment:Sendable {let from:Double,to:Double,duration:Double}
+    let videoID:String
+    let segments:[Segment]
+    func originalTime(for time:Double)->Double {
+        let inverse=segments.sorted {$0.to<$1.to}
+        guard let s=inverse.first(where:{time >= $0.to && time < $0.to+$0.duration}) ?? inverse.last(where:{time >= $0.to}) ?? inverse.first else {return time}
+        return max(0,s.from+min(s.duration,max(0,time-s.to)))
+    }
+    var parameters:[String:Any] {["id":videoID,"segments":segments.map {["from":$0.from,"to":$0.to,"duration":$0.duration]}]}
+}
+
 enum MusicParser {
+    // Only an explicit service pairing for the requested recording is accepted.
+    static func videoRendition(_ object:[String:Any],for id:String)->VideoRendition? {
+        for wrapper in descendants(object,key:"playlistPanelVideoWrapperRenderer").compactMap({$0 as? [String:Any]}) {
+            guard let primary=(wrapper["primaryRenderer"] as? [String:Any])?["playlistPanelVideoRenderer"] as? [String:Any] else {continue}
+            for other in wrapper["counterpart"] as? [[String:Any]] ?? [] {
+                guard let counterpart=(other["counterpartRenderer"] as? [String:Any])?["playlistPanelVideoRenderer"] as? [String:Any] else {continue}
+                let primaryID=primary["videoId"] as? String,otherID=counterpart["videoId"] as? String
+                let reversed=otherID==id
+                guard primaryID==id || reversed else {continue}
+                let target=reversed ? primary : counterpart
+                guard let targetID=target["videoId"] as? String,targetID != id,targetID.range(of:"^[A-Za-z0-9_-]{11}$",options:.regularExpression) != nil else {continue}
+                let type=descendants(target["navigationEndpoint"] ?? [:],key:"musicVideoType").compactMap {$0 as? String}.first
+                guard type=="MUSIC_VIDEO_TYPE_OMV" || type=="MUSIC_VIDEO_TYPE_UGC" else {continue}
+                let segments=((other["segmentMap"] as? [String:Any])?["segment"] as? [[String:Any]] ?? []).compactMap { row -> VideoRendition.Segment? in
+                    func number(_ key:String)->Double? {if let n=row[key] as? Double {return n/1000};return (row[key] as? String).flatMap(Double.init).map {$0/1000}}
+                    guard let a=number("primaryVideoStartTimeMilliseconds"),let b=number("counterpartVideoStartTimeMilliseconds"),let d=number("durationMilliseconds"),a.isFinite,b.isFinite,d.isFinite,a>=0,b>=0,d>0 else {return nil}
+                    return .init(from:reversed ? b:a,to:reversed ? a:b,duration:d)
+                }.sorted {$0.from<$1.from}
+                return VideoRendition(videoID:targetID,segments:segments)
+            }
+        }
+        return nil
+    }
+
     static func runs(_ value: Any?) -> String {
         guard let value=value as? [String:Any] else {return ""}
         if let text=value["simpleText"] as? String {return text}
@@ -197,13 +249,24 @@ actor MusicService {
     private let agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
     private let network:URLSession
     private let networkDelegate=MusicNetworkDelegate()
-    init() {let c=URLSessionConfiguration.ephemeral;c.timeoutIntervalForRequest=25;c.timeoutIntervalForResource=40;c.httpShouldSetCookies=false;network=URLSession(configuration:c,delegate:networkDelegate,delegateQueue:nil)}
+    init(config:[String:Any]?=nil,network:URLSession?=nil) {self.config=config;let c=URLSessionConfiguration.ephemeral;c.timeoutIntervalForRequest=25;c.timeoutIntervalForResource=40;c.httpShouldSetCookies=false;self.network=network ?? URLSession(configuration:c,delegate:networkDelegate,delegateQueue:nil)}
     func setSession(_ value:SessionCredentials?) {session=value}
+    func videoRendition(_ id:String) async throws -> VideoRendition? {
+        guard id.range(of:"^[A-Za-z0-9_-]{11}$",options:.regularExpression) != nil else {return nil}
+        let object=try await requestObject("next",["videoId":id,"playlistId":"RDAMVM"+id,"enablePersistentPlaylistPanel":true,"isAudioOnly":true,"tunerSettingValue":"AUTOMIX_SETTING_NORMAL","watchEndpointMusicSupportedConfigs":["watchEndpointMusicConfig":["hasPersistentPlaylistPanel":true,"musicVideoType":"MUSIC_VIDEO_TYPE_ATV"]]])
+        return MusicParser.videoRendition(object,for:id)
+    }
     func search(_ query:String) async throws -> MusicPage {try await request("search",["query":query])}
     func browse(_ id:String) async throws -> MusicPage {try await request("browse",["browseId":id])}
     func more(_ token:String,endpoint:String) async throws -> MusicPage {try await request(endpoint,["continuation":token])}
     func authenticate(_ value:SessionCredentials) async throws -> MusicPage {
         try await request("browse",["browseId":"FEmusic_liked_playlists"],using:value)
+    }
+    func like(_ id:String) async throws {
+        guard session != nil else {throw MusicError.message("Увійдіть через Google, щоб додати трек до улюблених.")}
+        guard id.range(of:"^[A-Za-z0-9_-]{11}$",options:.regularExpression) != nil else {throw MusicError.message("Некоректний ідентифікатор треку.")}
+        let result=try await requestObject("like/like",["target":["videoId":id]])
+        guard result["status"] as? String=="STATUS_SUCCEEDED" else {throw MusicError.message("YouTube Music не підтвердив додавання до улюблених.")}
     }
     private func context() async throws -> [String:Any] {
         if let config {return config}
@@ -219,8 +282,13 @@ actor MusicService {
         throw MusicError.message("YouTube Music змінив конфігурацію; потрібне оновлення клієнта.")
     }
     private func request(_ endpoint:String,_ payload:[String:Any],using override:SessionCredentials? = nil) async throws -> MusicPage {
-        guard ["search","browse"].contains(endpoint) else {throw MusicError.message("Непідтримуваний запит.")}
+        MusicParser.page(try await requestObject(endpoint,payload,using:override))
+    }
+    private func requestObject(_ endpoint:String,_ payload:[String:Any],using override:SessionCredentials? = nil) async throws -> [String:Any] {
+        guard ["search","browse","like/like","next"].contains(endpoint) else {throw MusicError.message("Непідтримуваний запит.")}
+        let activeSession=override ?? session
         let cfg=try await context()
+        try Task.checkCancellation()
         var context=cfg["INNERTUBE_CONTEXT"] as? [String:Any] ?? [:]
         if var client=context["client"] as? [String:Any] {client["hl"]="uk";context["client"]=client}
         var components=URLComponents(string:"https://music.youtube.com/youtubei/v1/"+endpoint)!
@@ -228,7 +296,6 @@ actor MusicService {
         var body=payload;body["context"]=context
         var req=URLRequest(url:components.url!);req.httpMethod="POST";req.httpBody=try JSONSerialization.data(withJSONObject:body)
         req.setValue("application/json",forHTTPHeaderField:"Content-Type");req.setValue(agent,forHTTPHeaderField:"User-Agent");req.setValue("https://music.youtube.com",forHTTPHeaderField:"Origin");req.setValue("https://music.youtube.com",forHTTPHeaderField:"X-Origin");req.setValue("https://music.youtube.com/",forHTTPHeaderField:"Referer")
-        let activeSession=override ?? session
         if let session=activeSession {req.setValue(session.cookie,forHTTPHeaderField:"Cookie");req.setValue(session.authorization(),forHTTPHeaderField:"Authorization");req.setValue(session.authUser,forHTTPHeaderField:"X-Goog-AuthUser");if let page=session.pageID {req.setValue(page,forHTTPHeaderField:"X-Goog-PageId")}}
         let (data,response)=try await network.data(for:req)
         guard let http=response as? HTTPURLResponse else {throw MusicError.message("Немає відповіді YouTube Music.")}
@@ -236,6 +303,6 @@ actor MusicService {
         guard let object=try JSONSerialization.jsonObject(with:data) as? [String:Any] else {throw MusicError.message("Непідтримувана відповідь YouTube Music.")}
         if object["error"] != nil {throw MusicError.message("YouTube Music відхилив запит.")}
         if activeSession != nil && !MusicParser.authenticated(object) {throw MusicError.message("Сесія закінчилася. Підключіть акаунт кнопкою GOOGLE.")}
-        return MusicParser.page(object)
+        return object
     }
 }

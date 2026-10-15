@@ -32,7 +32,12 @@ extension EqualizerSettings {
     private var muted=false
     init() {
         audio.attach(player);audio.attach(eq)
-        timer=Timer.scheduledTimer(withTimeInterval:0.08,repeats:true) {[weak self] _ in MainActor.assumeIsolated {self?.emit()}}
+    }
+    private func stopTimer() {timer?.invalidate();timer=nil}
+    private func startTimer() {
+        guard timer?.isValid != true else {return}
+        let t=Timer.scheduledTimer(withTimeInterval:0.08,repeats:true) {[weak self] _ in MainActor.assumeIsolated {self?.emit()}}
+        t.tolerance=0.016;timer=t
     }
     func open(_ url:URL) {
         requestedURL=url
@@ -48,7 +53,7 @@ extension EqualizerSettings {
             eq.installTap(onBus:0,bufferSize:2048,format:f.processingFormat) {[weak self,analyser] buffer,_ in
                 if let levels=analyser.analyse(buffer) {Task { @MainActor [weak self] in guard let self,self.generation==token else {return};self.onSpectrum?(levels)}}
             };tapInstalled=true
-            audio.prepare();try audio.start();schedule(0);player.play();emit()
+            audio.prepare();try audio.start();schedule(0);player.play();startTimer();emit()
         } catch {stopGraph();file=nil;releaseScope();onSpectrum?(Array(repeating:0,count:37));onError?("Не вдалося відкрити \(url.lastPathComponent): \(error.localizedDescription)");emit()}
     }
     private var duration:Double {file.map {Double($0.length)/$0.processingFormat.sampleRate} ?? 0}
@@ -63,19 +68,23 @@ extension EqualizerSettings {
         player.stop();ended=false;pausedTime=min(duration,max(0,seconds))
         baseFrame=min(file.length-1,max(0,AVAudioFramePosition(pausedTime*file.processingFormat.sampleRate)))
         player.scheduleSegment(file,startingFrame:baseFrame,frameCount:AVAudioFrameCount(file.length-baseFrame),at:nil,completionCallbackType:.dataPlayedBack) {[weak self] _ in
-            Task { @MainActor [weak self] in guard let self,self.segment==token else {return};self.ended=true;self.emit()}
+            Task { @MainActor [weak self] in guard let self,self.segment==token else {return};self.ended=true;self.player.pause();self.audio.pause();self.stopTimer();self.emit()}
         }
     }
-    func resume() {if file==nil,let requestedURL {open(requestedURL);return};if ended {schedule(0)};if file != nil {player.play()};emit()}
-    func restart() {if file==nil,let requestedURL {open(requestedURL);return};schedule(0);if file != nil {player.play()};emit()}
-    func pause() {pausedTime=time;player.pause();onSpectrum?(Array(repeating:0,count:37));emit()}
-    func stop() {schedule(0);onSpectrum?(Array(repeating:0,count:37));emit()}
-    func seek(_ fraction:Double) {let playing=player.isPlaying;schedule(min(1,max(0,fraction))*duration);if playing {player.play()};emit()}
-    func volume(_ value:Double) {level=value;audio.mainMixerNode.outputVolume=muted ? 0 : Float(level)}
-    func mute(_ value:Bool) {muted=value;audio.mainMixerNode.outputVolume=muted ? 0 : Float(level)}
+    private func startRendering() -> Bool {
+        do {if !audio.isRunning {try audio.start()};return true}
+        catch {onError?("Не вдалося відновити аудіо: "+error.localizedDescription);return false}
+    }
+    func resume() {if file==nil,let requestedURL {open(requestedURL);return};if ended {schedule(0)};if file != nil,startRendering() {player.play();startTimer()};emit()}
+    func restart() {if file==nil,let requestedURL {open(requestedURL);return};schedule(0);if file != nil,startRendering() {player.play();startTimer()};emit()}
+    func pause() {pausedTime=time;player.pause();audio.pause();stopTimer();onSpectrum?(Array(repeating:0,count:37));emit()}
+    func stop() {schedule(0);audio.pause();stopTimer();onSpectrum?(Array(repeating:0,count:37));emit()}
+    func seek(_ fraction:Double) {let playing=player.isPlaying;schedule(min(1,max(0,fraction))*duration);if playing {player.play();startTimer()};emit()}
+    func volume(_ value:Double,publish:Bool=true) {level=value;audio.mainMixerNode.outputVolume=muted ? 0 : Float(level);if publish {emit()}}
+    func mute(_ value:Bool,publish:Bool=true) {muted=value;audio.mainMixerNode.outputVolume=muted ? 0 : Float(level);if publish {emit()}}
     func equalizerSettings(_ value:EqualizerSettings) {settings=value;value.apply(to:eq,sampleRate:file?.processingFormat.sampleRate ?? 48000)}
     private func emit() {onState?(PlaybackState(time:time,duration:duration,paused:!player.isPlaying,ended:ended,hasSource:file != nil,ad:false,title:"",artist:"",error:"",volume:level,muted:muted))}
-    private func stopGraph() {generation+=1;segment+=1;player.stop();audio.stop();if tapInstalled {eq.removeTap(onBus:0);tapInstalled=false}}
+    private func stopGraph() {stopTimer();generation+=1;segment+=1;player.stop();audio.stop();if tapInstalled {eq.removeTap(onBus:0);tapInstalled=false}}
     private func releaseScope() {if hasScope {scopedURL?.stopAccessingSecurityScopedResource()};hasScope=false;scopedURL=nil}
     func shutdown() {timer?.invalidate();timer=nil;stopGraph();file=nil;requestedURL=nil;releaseScope()}
 }
@@ -105,9 +114,9 @@ final class SpectrumAnalyser {
         return (0..<37).map {band in
             let low=Float(30*pow(600,Double(band)/37)),high=Float(30*pow(600,Double(band+1)/37))
             let start=min(size/2-1,max(1,Int(low/bin))),end=min(size/2-1,max(start,Int(high/bin)))
-            let amplitude=sqrt(power[start...end].max() ?? 0)/Float(size)
+            let amplitude=sqrt(power[start...end].reduce(0,+)/Float(end-start+1))/Float(size)
             let db=20*log10(max(0.000001,amplitude))
-            return min(1,max(0,(db+70)/60))
+            return min(1,max(0,(db+90)/90))
         }
     }
 }

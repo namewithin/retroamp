@@ -78,7 +78,7 @@ final class EqualizerView:NSView {
     }
     required init?(coder:NSCoder) {fatalError()}
     func syncControls() {
-        toggle.title=settings.enabled ? "ON ▪" : "OFF";toggle.skinSelected=settings.enabled;toggle.needsDisplay=true
+        toggle.title=settings.enabled ? "ON" : "OFF";toggle.skinSelected=settings.enabled;toggle.toolTip=settings.enabled ? "Еквалайзер увімкнено" : "Еквалайзер вимкнено";toggle.needsDisplay=true
         for (i,slider) in sliders.enumerated() {slider.gain=i==0 ? settings.preamp : settings.gains[i-1]}
         needsDisplay=true
     }
@@ -97,7 +97,7 @@ final class EqualizerView:NSView {
         settings.gains=values[sender.tag];settings.preamp=sender.tag==0 ? 0 : -4;changed()
     }
     @objc func closePanel() {onClose?()}
-    override func mouseDown(with event:NSEvent) {if convert(event.locationInWindow,from:nil).y<20 {window?.performDrag(with:event)}}
+    override func mouseDown(with event:NSEvent) {if convert(event.locationInWindow,from:nil).y<20 {if let w=window as? RetroWindow,let group=w.group {group.dragWindow(w,with:event)} else {window?.performDrag(with:event)}}}
     func scaled(_ r:NSRect)->NSRect {NSRect(x:r.minX*360/275,y:r.minY*140/116,width:r.width*360/275,height:r.height*140/116)}
     func applySkinLayout() {
         let skinned=activeSkin != nil

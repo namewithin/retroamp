@@ -1,0 +1,46 @@
+name: macOS build and native audio
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      RETROAMP_APP_DIR: ${{ runner.temp }}/retroamp-build
+      RETROAMP_SKIP_DMG: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Compiler and SDK
+        run: |
+          xcrun swiftc --version
+          xcrun --show-sdk-version
+      - name: Build and verify signatures
+        run: ./build.sh
+      - name: Native audio, without capture or account access
+        run: python3 scripts/check-offline.py --app "$RETROAMP_APP_DIR/Retroamp.app" --output "$RUNNER_TEMP/native-audio.json"
+      - name: Save check result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-audio-${{ matrix.runner }}
+          path: ${{ runner.temp }}/native-audio.json
+          if-no-files-found: ignore
