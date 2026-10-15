@@ -23,7 +23,6 @@ jobs:
     timeout-minutes: 20
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
-      RETROAMP_APP_DIR: ${{ runner.temp }}/retroamp-build
       RETROAMP_SKIP_DMG: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -34,9 +33,9 @@ jobs:
           xcrun swiftc --version
           xcrun --show-sdk-version
       - name: Build and verify signatures
-        run: ./build.sh
+        run: RETROAMP_APP_DIR="$RUNNER_TEMP/retroamp-build" ./build.sh
       - name: Native audio, without capture or account access
-        run: python3 scripts/check-offline.py --app "$RETROAMP_APP_DIR/Retroamp.app" --output "$RUNNER_TEMP/native-audio.json"
+        run: python3 scripts/check-offline.py --app "$RUNNER_TEMP/retroamp-build/Retroamp.app" --output "$RUNNER_TEMP/native-audio.json"
       - name: Save check result
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
