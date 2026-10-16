@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 let green = NSColor(calibratedRed: 0.60, green: 0.94, blue: 0.18, alpha: 1)
 let dimGreen = NSColor(calibratedRed: 0.24, green: 0.35, blue: 0.12, alpha: 1)
 let graphite = NSColor(calibratedRed: 0.17, green: 0.18, blue: 0.25, alpha: 1)
+let diagnosticBuild=Bundle.main.bundleIdentifier?.hasPrefix("local.retroamp.qa.")==true
 
 private var drawingFonts:[String:NSFont]=[:]
 func drawingFont(size:CGFloat,bold:Bool)->NSFont? {
@@ -29,11 +30,12 @@ func bevel(_ rect: NSRect, recessed: Bool = false) {
 
 final class MetalButton: NSButton {
     var skinRole:String?
-    var skinSelected=false
+    var skinSelected=false {didSet {guard oldValue != skinSelected else{return};needsDisplay=true;if (indicatesState && skinRole != "repeat") || skinRole=="pin" {setAccessibilityValue(skinSelected ? "Увімкнено" : "Вимкнено")}}}
     override func draw(_ dirtyRect: NSRect) {
-        if let skin=activeSkin,let role=skinRole,skin.button(role,pressed:isHighlighted,selected:skinSelected,in:bounds) {return}
-        fill(bounds, isHighlighted ? NSColor(calibratedWhite: 0.38, alpha: 1) : skinSelected && skinRole=="pin" ? NSColor(calibratedRed:0.82,green:0.77,blue:0.47,alpha:1) : NSColor(calibratedRed:0.62,green:0.67,blue:0.72,alpha:1))
+        if let skin=activeSkin,let role=skinRole,skin.button(role,pressed:isHighlighted,selected:skinSelected,in:bounds) {if ["play","pause","stop"].contains(role) {drawStateLamp()};return}
+        fill(bounds, isHighlighted ? NSColor(calibratedWhite: 0.38, alpha: 1) : skinSelected && skinRole=="pin" ? NSColor(calibratedRed:0.82,green:0.77,blue:0.47,alpha:1) : skinSelected && indicatesState ? NSColor(calibratedRed:0.52,green:0.58,blue:0.50,alpha:1) : NSColor(calibratedRed:0.62,green:0.67,blue:0.72,alpha:1))
         bevel(bounds.insetBy(dx: 1, dy: 1), recessed: isHighlighted)
+        drawStateLamp()
         if let role=skinRole ?? identifier?.rawValue,drawIcon(role) {return}
         let size: CGFloat = title.count > 3 ? 8 : 9
         guard let font=drawingFont(size:size,bold:true) else {return}
@@ -87,9 +89,10 @@ final class RetroRow:NSTableRowView {
 
 final class RetroView:NSView {
     override var isFlipped:Bool {true}
+    override var isOpaque:Bool {true}
     var status="⌘O — ФАЙЛИ • GOOGLE — YOUTUBE MUSIC" {didSet {statusLabel.stringValue=status;statusLabel.toolTip=status}}
-    var titleLine="YOUTUBE MUSIC" {didSet {if oldValue != titleLine {titleMarquee.reset();skinMarquee.reset()}}}
-    var artistLine="Відкрийте файли або підключіть Google." {didSet {if oldValue != artistLine {artistMarquee.reset();skinMarquee.reset()}}}
+    var titleLine="YOUTUBE MUSIC" {didSet {if oldValue != titleLine {titleMarquee.reset();skinMarquee.reset();setNeedsDisplay(titleDisplayRect)}}}
+    var artistLine="Відкрийте файли або підключіть Google." {didSet {if oldValue != artistLine {artistMarquee.reset();skinMarquee.reset();setNeedsDisplay(titleDisplayRect)}}}
     let titleMarquee=MarqueeState(),artistMarquee=MarqueeState(),skinMarquee=MarqueeState()
     let clockControl=DisplayHitControl(),spectrumControl=DisplayHitControl()
     var elapsed:Double=0,duration:Double=0
@@ -98,7 +101,11 @@ final class RetroView:NSView {
     var lastAnimationTime=ProcessInfo.processInfo.systemUptime
     var rows:[String]=[] {didSet {table.reloadData()}}
     var sectionTitle="PLAYLIST" {didSet {playlistView.needsDisplay=true}}
-    var isPlaying=false,hasSource=false
+    var isPlaying=false {didSet {if isPlaying {startDisplayTimer()}}}
+    var hasSource=false
+    var transportState=TransportState.idle
+    var transportStateInitialized=false
+    let transportIndicator=NSView()
     var durationLine="",formatLine="STREAM / STEREO"
     var clock="00:00"
     var selected = -1
@@ -107,6 +114,9 @@ final class RetroView:NSView {
     let statusLabel=NSTextField(labelWithString:"")
     let equalizerView=EqualizerView(frame:NSRect(x:0,y:0,width:360,height:140))
     var spectrum=[Float](repeating:0,count:37),peaks=[Float](repeating:0,count:37)
+    var spectrumInput=[Float](repeating:0,count:37)
+    let spectrumDynamics=SpectrumDynamics()
+    var visualizerSettings=VisualizerSettings.load()
     var spectrumTimer:Timer?
     var onAction:((String)->Void)?
     var onFiles:(([URL])->Void)?
@@ -117,14 +127,8 @@ final class RetroView:NSView {
     var defaultFrames:[String:NSRect]=[:]
     var playlistY:CGFloat {0}
     override init(frame:NSRect) {
-        super.init(frame:frame);registerForDraggedTypes([.fileURL])
-        spectrumTimer=Timer.scheduledTimer(withTimeInterval:1.0/30,repeats:true) {[weak self] _ in
-            guard let self else {return}
-            for i in 0..<37 {self.peaks[i]=max(self.spectrum[i],self.peaks[i]-0.025);if !self.isPlaying {self.spectrum[i]=max(0,self.spectrum[i]-0.06)}}
-            let now=ProcessInfo.processInfo.systemUptime,delta=min(0.1,max(0,now-self.lastAnimationTime));self.lastAnimationTime=now
-            for marquee in [self.titleMarquee,self.artistMarquee,self.skinMarquee] {marquee.advance(delta)}
-            self.needsDisplay=true
-        }
+        super.init(frame:frame);wantsLayer=true;layerContentsRedrawPolicy = .onSetNeedsDisplay;registerForDraggedTypes([.fileURL])
+        startDisplayTimer()
         for (label,x,width,command) in [("|◀",13.0,28.0,"previous"),("▶",43.0,28.0,"play"),("Ⅱ",73.0,28.0,"pause"),("■",103.0,28.0,"stop"),("▶|",133.0,28.0,"next"),("▲",169.0,28.0,"openFiles"),("SHUF",219.0,61.0,"shuffle"),("REP",282.0,61.0,"repeat")] {
             _=addButton(label,NSRect(x:x,y:115,width:width,height:21),command)
         }
@@ -133,19 +137,56 @@ final class RetroView:NSView {
         _=addButton("×",NSRect(x:338,y:5,width:13,height:11),"close")
         _=addButton("EQ",NSRect(x:289,y:78,width:27,height:16),"toggleEQ")
         _=addButton("PL",NSRect(x:318,y:78,width:27,height:16),"togglePlaylist")
-        volume.frame=NSRect(x:174,y:78,width:106,height:16);volume.value=0.15;volume.target=self;volume.action=#selector(volumeChanged);volume.setAccessibilityLabel("Гучність");addSubview(volume)
+        _=addButton("VID",NSRect(x:254,y:78,width:32,height:16),"toggleVideo")
+        volume.frame=NSRect(x:174,y:78,width:75,height:16);volume.value=0.15;volume.target=self;volume.action=#selector(volumeChanged);volume.setAccessibilityLabel("Гучність");addSubview(volume)
         seek.frame=NSRect(x:12,y:100,width:333,height:12);seek.value=0;seek.isSeek=true;seek.target=self;seek.action=#selector(seekChanged);seek.setAccessibilityLabel("Позиція треку");addSubview(seek)
         query.font = drawingFont(size:9,bold:false);query.placeholderString="Пошук YouTube Music";query.textColor=green;query.backgroundColor = .black;query.isBordered=true;query.focusRingType = .none;query.target=self;query.action=#selector(search);addSubview(query)
-        playlistButtons=[addButton("GOOGLE",.zero,"connect"),addButton("LIB",.zero,"library"),addButton("Q",.zero,"queue"),addButton("+",.zero,"more")]
-        playlistButtons[0].setAccessibilityLabel("Увійти через Google");playlistButtons[1].setAccessibilityLabel("Бібліотека");playlistButtons[2].setAccessibilityLabel("Черга");playlistButtons[3].setAccessibilityLabel("Завантажити ще")
+        playlistButtons=[addButton("GOOGLE",.zero,"connect"),addButton("LIB",.zero,"library"),addButton("Q",.zero,"queue"),addButton("+",.zero,"favorite")]
+        playlistButtons[0].setAccessibilityLabel("Увійти через Google");playlistButtons[1].setAccessibilityLabel("Бібліотека");playlistButtons[2].setAccessibilityLabel("Черга");playlistButtons[3].setAccessibilityLabel("Додати поточний трек до улюблених");playlistButtons[3].toolTip="Додати поточний трек до улюблених"
         let column=NSTableColumn(identifier:NSUserInterfaceItemIdentifier("track"));column.width=330;table.addTableColumn(column);table.headerView=nil;table.rowHeight=18;table.intercellSpacing = .zero;table.backgroundColor = .black;table.selectionHighlightStyle = .regular;table.gridStyleMask=[]
         scroll.documentView=table;scroll.hasVerticalScroller=true;scroll.autohidesScrollers=true;scroll.borderType = .noBorder;scroll.backgroundColor = .black;addSubview(scroll)
         statusLabel.font = drawingFont(size:8,bold:false);statusLabel.textColor=NSColor(calibratedWhite:0.70,alpha:1);statusLabel.lineBreakMode = .byTruncatingTail;statusLabel.stringValue=status
         clockControl.setAccessibilityLabel("Час треку: минув / залишилось");clockControl.toolTip="Клік: час, що минув / залишилось";clockControl.target=self;clockControl.action=#selector(toggleClock);addSubview(clockControl)
         spectrumControl.setAccessibilityLabel("Спектр: вузькі / широкі смуги");spectrumControl.toolTip="Клік: вузькі / широкі смуги";spectrumControl.target=self;spectrumControl.action=#selector(toggleSpectrum);addSubview(spectrumControl)
         applySkinLayout();arrangeModules();updateClock(time:0,duration:0)
+        transportIndicator.setAccessibilityElement(true);transportIndicator.setAccessibilityRole(.staticText);transportIndicator.setAccessibilityLabel("Стан відтворення");addSubview(transportIndicator);updateTransport(.idle)
     }
     required init?(coder:NSCoder) {fatalError()}
+    deinit {for observer in animationObservers {NotificationCenter.default.removeObserver(observer)};spectrumTimer?.invalidate()}
+    private var animationObservers:[NSObjectProtocol]=[]
+    private var needsAnimation:Bool {isPlaying || spectrumDynamics.hasActivity || (activeSkin==nil ? titleMarquee.needsAnimation || artistMarquee.needsAnimation:skinMarquee.needsAnimation)}
+    private var animationVisible:Bool {window?.isVisible==true && window?.isMiniaturized==false && window?.occlusionState.contains(.visible)==true && !NSApp.isHidden}
+    private func stopDisplayTimer() {spectrumTimer?.invalidate();spectrumTimer=nil}
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        for observer in animationObservers {NotificationCenter.default.removeObserver(observer)};animationObservers=[]
+        for name in [NSWindow.didChangeOcclusionStateNotification,NSWindow.didDeminiaturizeNotification,NSWindow.didMiniaturizeNotification] {
+            animationObservers.append(NotificationCenter.default.addObserver(forName:name,object:window,queue:.main) {[weak self] _ in
+                MainActor.assumeIsolated {guard let self else {return};if self.animationVisible && self.needsAnimation {self.startDisplayTimer()}else {self.stopDisplayTimer()}}
+            })
+        }
+        if animationVisible && needsAnimation {startDisplayTimer()}else {stopDisplayTimer()}
+    }
+    private var titleDisplayRect:NSRect {activeSkin==nil ? NSRect(x:136,y:25,width:209,height:36):skinRect(NSRect(x:111,y:22,width:152,height:15))}
+    private var spectrumDisplayRect:NSRect {activeSkin==nil ? NSRect(x:18,y:69,width:100,height:24):skinRect(NSRect(x:24,y:43,width:74,height:18))}
+    func startDisplayTimer() {
+        guard animationVisible else {stopDisplayTimer();return}
+        let interval=1/visualizerSettings.fps
+        if spectrumTimer?.isValid==true,spectrumTimer?.timeInterval==interval {return}
+        stopDisplayTimer();lastAnimationTime=ProcessInfo.processInfo.systemUptime
+        let timer=Timer(timeInterval:interval,repeats:true) {[weak self] _ in
+            guard let self else {return}
+            guard self.animationVisible,self.needsAnimation else {self.stopDisplayTimer();return}
+            let now=ProcessInfo.processInfo.systemUptime,delta=min(0.2,max(0,now-self.lastAnimationTime));self.lastAnimationTime=now
+            self.spectrumDynamics.step(input:self.spectrumInput,playing:self.isPlaying,delta:delta,settings:self.visualizerSettings)
+            self.spectrum=self.spectrumDynamics.levels;self.peaks=self.spectrumDynamics.peaks
+            for marquee in [self.titleMarquee,self.artistMarquee,self.skinMarquee] {marquee.advance(delta)}
+            self.setNeedsDisplay(self.spectrumDisplayRect)
+            if self.titleMarquee.needsAnimation || self.artistMarquee.needsAnimation || self.skinMarquee.needsAnimation{self.setNeedsDisplay(self.titleDisplayRect)}
+        }
+        timer.tolerance=interval/5;spectrumTimer=timer;RunLoop.main.add(timer,forMode:.common)
+    }
+    func applyVisualizer(_ settings:VisualizerSettings) {let old=visualizerSettings.fps;visualizerSettings=settings;if old != settings.fps {startDisplayTimer()}}
     @discardableResult func addButton(_ title:String,_ frame:NSRect,_ command:String)->NSButton {
         let button=MetalButton(frame:frame);button.skinRole=command;defaultFrames[command]=frame;button.title=title;button.identifier=NSUserInterfaceItemIdentifier(command);button.target=self;button.action=#selector(buttonPressed);button.isBordered=false;button.setAccessibilityLabel(command=="connect" ? "Увійти через Google" : command=="openFiles" ? "Відкрити локальні аудіофайли" : title);addSubview(button);return button
     }
@@ -157,10 +198,12 @@ final class RetroView:NSView {
         let positions:[String:NSRect]=[
             "previous":NSRect(x:16,y:88,width:23,height:18),"play":NSRect(x:39,y:88,width:23,height:18),"pause":NSRect(x:62,y:88,width:23,height:18),"stop":NSRect(x:85,y:88,width:23,height:18),"next":NSRect(x:108,y:88,width:22,height:18),"openFiles":NSRect(x:136,y:89,width:22,height:16),"shuffle":NSRect(x:164,y:89,width:47,height:15),"repeat":NSRect(x:210,y:89,width:28,height:15),"toggleEQ":NSRect(x:219,y:58,width:23,height:12),"togglePlaylist":NSRect(x:242,y:58,width:23,height:12),"pin":NSRect(x:254,y:3,width:9,height:9),"minimize":NSRect(x:244,y:3,width:9,height:9),"close":NSRect(x:264,y:3,width:9,height:9)]
         for b in subviews.compactMap({$0 as? MetalButton}) {if let key=b.identifier?.rawValue {b.frame=activeSkin==nil ? (defaultFrames[key] ?? b.frame) : positions[key].map {skinRect($0)} ?? b.frame;b.needsDisplay=true}}
-        volume.frame=activeSkin==nil ? NSRect(x:174,y:78,width:106,height:16) : skinRect(NSRect(x:107,y:57,width:68,height:13))
+        if let video=subviews.compactMap({$0 as? MetalButton}).first(where:{$0.identifier?.rawValue=="toggleVideo"}),activeSkin != nil {video.frame=skinRect(NSRect(x:177,y:58,width:38,height:12))}
+        volume.frame=activeSkin==nil ? NSRect(x:174,y:78,width:75,height:16) : skinRect(NSRect(x:107,y:57,width:68,height:13))
         seek.frame=activeSkin==nil ? NSRect(x:12,y:100,width:333,height:12) : skinRect(NSRect(x:16,y:72,width:248,height:10))
         clockControl.frame=activeSkin==nil ? NSRect(x:30,y:28,width:95,height:35) : skinRect(NSRect(x:39,y:23,width:63,height:18))
         spectrumControl.frame=activeSkin==nil ? NSRect(x:16,y:66,width:109,height:30) : skinRect(NSRect(x:23,y:42,width:77,height:20))
+        transportIndicator.frame=activeSkin==nil ? NSRect(x:17,y:35,width:10,height:10) : skinRect(NSRect(x:24,y:28,width:9,height:9))
         updateDisplayAccessibility()
         equalizerView.applySkinLayout();playlistView.needsDisplay=true;needsDisplay=true
     }
@@ -169,8 +212,9 @@ final class RetroView:NSView {
     func updateClock(time:Double,duration:Double) {
         elapsed=time.isFinite ? max(0,time) : 0;self.duration=duration.isFinite ? max(0,duration) : 0
         let value=remainingTime ? max(0,self.duration-elapsed) : elapsed
+        let oldClock=clock
         let seconds=Int(min(value,Double(Int.max/2)).rounded(.down));clock=(remainingTime ? "−" : "")+String(format:"%02d:%02d",seconds/60,seconds%60)
-        updateDisplayAccessibility();needsDisplay=true
+        if oldClock != clock{updateDisplayAccessibility();setNeedsDisplay(activeSkin==nil ? NSRect(x:12,y:25,width:116,height:43):skinRect(NSRect(x:36,y:24,width:68,height:20)))}
     }
     func updateDisplayAccessibility() {
         clockControl.setAccessibilityValue((remainingTime ? "Залишилось " : "Минуло ")+clock)
@@ -215,19 +259,20 @@ final class RetroView:NSView {
     }
     override func mouseDown(with event:NSEvent) {if convert(event.locationInWindow,from:nil).y<20 {if let w=window as? RetroWindow,let group=w.group {group.dragPlayer(with:event)} else {window?.performDrag(with:event)}}}
     override func draw(_ dirtyRect:NSRect) {
+        defer {if animationVisible && needsAnimation {startDisplayTimer()}}
         fill(bounds,NSColor(calibratedWhite:0.025,alpha:1))
         if let skin=activeSkin {drawSkin(skin);return}
-        panel(NSRect(x:0,y:0,width:360,height:146),"RETROAMP")
+        panel(NSRect(x:0,y:0,width:360,height:146),diagnosticBuild ? "TEST / MUTED" : "RETROAMP")
         
         let screen=NSRect(x:12,y:25,width:116,height:72);fill(screen,NSColor(calibratedRed:0.01,green:0.025,blue:0.017,alpha:1));bevel(screen,recessed:true)
         NSGraphicsContext.saveGraphicsState();let transform=NSAffineTransform();transform.translateX(by:clock.hasPrefix("−") ? 29 : 31,yBy:32);transform.scale(by:clock.hasPrefix("−") ? 0.56 : 0.60);transform.concat();drawClockRaw(clock,origin:.zero);NSGraphicsContext.restoreGraphicsState()
-        text(isPlaying ? "▶" : "Ⅱ",NSRect(x:17,y:35,width:12,height:14),size:10,color:isPlaying ? green : dimGreen)
+        drawTransportIndicator(in:NSRect(x:17,y:35,width:10,height:10))
         drawSpectrum(in:NSRect(x:18,y:69,width:100,height:24))
         fill(NSRect(x:136,y:25,width:209,height:36),.black);bevel(NSRect(x:136,y:25,width:209,height:36),recessed:true)
         titleMarquee.draw(titleLine,in:NSRect(x:142,y:29,width:197,height:14),size:10,color:green)
         artistMarquee.draw(artistLine,in:NSRect(x:142,y:45,width:197,height:12),size:8,color:dimGreen)
         text(formatLine,NSRect(x:137,y:65,width:143,height:11),size:8,color:.lightGray)
-        text(isPlaying ? "STEREO" : hasSource ? "PAUSED" : "READY",NSRect(x:295,y:65,width:54,height:11),size:8,color:green)
+        text(transportState.label,NSRect(x:295,y:65,width:54,height:11),size:8,color:transportState == .playing ? green : .lightGray)
         text("VOL",NSRect(x:138,y:81,width:27,height:11),size:8,color:.lightGray)
         
     }
@@ -240,7 +285,7 @@ final class RetroView:NSView {
         let minus=skinRect(NSRect(x:39,y:31,width:6,height:1));fill(minus,clock.hasPrefix("−") ? skin.textColor : (skin.pixelColor("main",x:40,y:26) ?? .black))
         skinMarquee.draw(titleLine+" • "+artistLine,in:skinRect(NSRect(x:112,y:23,width:151,height:13)),size:10,color:skin.textColor)
         fill(skinRect(NSRect(x:111,y:42,width:91,height:12)),skin.pixelColor("main",x:114,y:25) ?? .black);text(formatLine,skinRect(NSRect(x:111,y:43,width:91,height:10)),size:7,color:skin.textColor)
-        _=skin.draw("playpaus",NSRect(x:isPlaying ? 0 : hasSource ? 9 : 18,y:0,width:9,height:9),skinRect(NSRect(x:24,y:28,width:9,height:9)))
+        _=skin.draw("playpaus",NSRect(x:transportState == .playing ? 0 : transportState == .paused ? 9 : 18,y:0,width:9,height:9),skinRect(NSRect(x:24,y:28,width:9,height:9)))
         _=skin.draw("monoster",NSRect(x:0,y:isPlaying ? 0 : 12,width:29,height:12),skinRect(NSRect(x:212,y:41,width:29,height:12)))
         drawSpectrum(in:skinRect(NSRect(x:24,y:43,width:74,height:18)),skin:skin)
     }
@@ -275,30 +320,43 @@ final class RetroWindow:NSWindow {
 }
 
 final class ConnectionPanel:NSPanel {
+    let restore=NSButton(title:"Відновити збережений вхід",target:nil,action:nil)
     let google=NSButton(title:"Увійти через Google",target:nil,action:nil)
     let cancel=NSButton(title:"Скасувати",target:nil,action:nil)
     let message=NSTextField(wrappingLabelWithString:"Відкриється окреме вікно Google. Увійдіть у свій акаунт — бібліотека підключиться автоматично.")
     var submitted:(()->Void)?
     var cancelled:(()->Void)?
+    var restored:(()->Void)?
     init() {
-        super.init(contentRect:NSRect(x:0,y:0,width:360,height:174),styleMask:[.titled],backing:.buffered,defer:false)
+        super.init(contentRect:NSRect(x:0,y:0,width:360,height:214),styleMask:[.titled],backing:.buffered,defer:false)
         title="YouTube Music · Google"
         guard let content=contentView else {return}
-        message.frame=NSRect(x:20,y:82,width:320,height:70);message.font = drawingFont(size:11,bold:false);content.addSubview(message)
+        message.stringValue="Збережений вхід відновлюється без браузера. Після оновлення macOS може попросити доступ до Keychain. Для іншого акаунта натисніть «Увійти через Google»."
+        message.frame=NSRect(x:20,y:122,width:320,height:72);message.font = drawingFont(size:11,bold:false);content.addSubview(message)
+        restore.frame=NSRect(x:20,y:80,width:320,height:32);restore.font=drawingFont(size:10,bold:false);restore.bezelStyle = .rounded;restore.target=self;restore.action=#selector(restoreSaved);content.addSubview(restore)
         google.frame=NSRect(x:20,y:40,width:212,height:32);google.font=drawingFont(size:10,bold:false);google.bezelStyle = .rounded;google.target=self;google.action=#selector(submit);content.addSubview(google)
         cancel.frame=NSRect(x:242,y:40,width:98,height:32);cancel.font=drawingFont(size:10,bold:false);cancel.bezelStyle = .rounded;cancel.target=self;cancel.action=#selector(closeSheet);content.addSubview(cancel)
         let privacy=NSTextField(labelWithString:"Пароль вводиться на сторінці Google.");privacy.frame=NSRect(x:20,y:14,width:320,height:16);privacy.font = drawingFont(size:9,bold:false);privacy.textColor = .secondaryLabelColor;content.addSubview(privacy)
     }
     @objc func submit() {submitted?()}
+    @objc func restoreSaved() {restored?()}
     @objc func closeSheet() {cancelled?()}
 }
 
 @MainActor
 final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NSTableViewDelegate {
+    let library=LibraryStore()
+    let mediaControls=MediaControls()
+    var settingsWindow:SettingsWindow?
+    var importTask:Task<Void,Never>?
+    var favoriteTask:Task<Void,Never>?
     let windowGroup=WindowGroup()
     var window:RetroWindow!
     var equalizerWindow:RetroWindow!
     var playlistWindow:RetroWindow!
+    var videoWindow:RetroWindow!
+    let videoPanel=VideoPanel(frame:NSRect(x:0,y:0,width:480,height:318))
+    var videoVisible=UserDefaults.standard.bool(forKey:"video.visible")
     var skinTask:Task<Void,Never>?
     let view=RetroView(frame:NSRect(x:0,y:0,width:360,height:166))
     let service=MusicService()
@@ -320,6 +378,10 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
     let googleLogin=GoogleLogin()
     var lastState:PlaybackState?
     var repeatMode=0
+    var shuffleEnabled=false
+    var orderedQueue:[MusicItem]=[]
+    var previousRewind:(id:String,until:Double)?
+    var transportIntent=TransportState.idle
     var muted=false
     var endHandled=false
     var renderPath:String?
@@ -333,6 +395,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
     var pendingFileURLs:[URL]=[]
     var requestedPlaybackAt=Date()
     var eventMonitor:Any?
+    var statusHoldUntil=Date.distantPast
     func applicationDidFinishLaunching(_ notification:Notification) {
         setUpMenu()
         makeWindows()
@@ -340,37 +403,64 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
         updatePinButton(windowGroup.alwaysOnTop)
         view.table.dataSource=self;view.table.delegate=self;view.table.target=self;view.table.doubleAction=#selector(activateSelection)
         view.onAction={ [weak self] action in self?.act(action) }
+        view.updateModes(shuffle:shuffleEnabled,repeatMode:repeatMode)
+        updateFavoriteButton()
         view.onFiles={ [weak self] urls in self?.importFiles(urls) }
         engine.onState={ [weak self] state in self?.receive(state) }
         engine.onProgress={ [weak self] message in self?.status(message) }
-        engine.onError={ [weak self] error in self?.status(error);if let self,self.verificationPath != nil {
+        engine.onError={ [weak self] error in self?.status(error);self?.view.updateTransport(.failed);self?.view.hasSource=false;self?.mediaControls.clear();if let self,self.verificationPath != nil {
             if self.verificationStage==8 {self.verification["expectedTransportError"]=true;self.verificationStage=9;self.engine.resume()} else {self.verification["engineError"]=error}
         } }
-        engine.onSpectrum={ [weak self] levels in guard let self,levels.count==37 else {return};self.view.spectrum=levels;self.view.needsDisplay=true
+        engine.onSpectrum={ [weak self] levels in guard let self,levels.count==37 else {return};self.view.spectrumInput=levels
             if self.verificationPath != nil,(levels.max() ?? 0)>0.02 {
                 self.verification["spectrumNonzeroFrames"]=(self.verification["spectrumNonzeroFrames"] as? Int ?? 0)+1
                 self.verification["spectrumPeak"]=max(self.verification["spectrumPeak"] as? Float ?? 0,levels.max() ?? 0)
             } }
         view.onModules={ [weak self] in self?.showModules() }
+        videoPanel.onClose={ [weak self] in self?.setVideoVisible(false) }
+        videoPanel.canvas.onToggle={ [weak self] in self?.act("togglePlayback") }
+        engine.videoOutput.onFrame={ [weak self] image in self?.videoPanel.canvas.image=image }
+        engine.videoOutput.onError={ [weak self] message in self?.videoPanel.canvas.message=message }
+        engine.resolveVideoRendition={ [service] id in try await service.videoRendition(id) }
+        videoPanel.onQuality={ [weak self] quality in self?.engine.videoQuality=quality;quality.save() }
+        engine.onVideoQuality={ [weak self] state in self?.videoPanel.showQuality(state) }
+        engine.onVideoMessage={ [weak self] message in self?.videoPanel.canvas.message=message }
+        engine.videoVisible=videoVisible;updateVideoButton()
+        mediaControls.onAction={ [weak self] action in self?.handleMediaAction(action) ?? false }
         view.equalizerView.onClose={ [weak self] in self?.act("toggleEQ") }
         view.equalizerView.onChange={ [weak self] settings in self?.engine.equalizerSettings(settings) }
         engine.equalizerSettings(view.equalizerView.settings);engine.volume(view.volume.value);if CommandLine.arguments.contains("--quiet") {engine.mute(true)}
         showModules();window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)
+        if diagnosticBuild,CommandLine.arguments.contains(where:{$0.hasPrefix("--check-")}) {for w in windowGroup.windows {w.ignoresMouseEvents=true}}
         eventMonitor=NSEvent.addLocalMonitorForEvents(matching:.keyDown) { [weak self] event in
             guard let self else {return event}
-            if self.handlesTransportKey(event) {self.act(self.lastState?.paused==false ? "pause" : "play");return nil}
+            if let action=self.transportKeyAction(event) {self.act(action);return nil}
             return event
         }
         if let path=argument("--verify-local"),let input=argument("--local-directory") {
             verificationPath=path;engine.mute(true)
             let urls=(try? FileManager.default.contentsOfDirectory(at:URL(fileURLWithPath:input),includingPropertiesForKeys:nil))?.sorted { $0.lastPathComponent<$1.lastPathComponent } ?? []
             importFiles(urls,autoplay:false)
-            verification["localImportedCount"]=items.count
-            verification["localAllPlayable"]=items.allSatisfy(\.isPlayable)
-            if let item=items.first {queue=items;queueIndex=0;play(item)}
-            DispatchQueue.main.asyncAfter(deadline:.now()+25) {self.finishLocalVerification()}
+            Task { @MainActor in
+                await importTask?.value
+                verification["localImportedCount"]=items.count
+                verification["localAllPlayable"]=items.allSatisfy(\.isPlayable)
+                if let item=items.first {queue=items;queueIndex=0;play(item)}
+                DispatchQueue.main.asyncAfter(deadline:.now()+25) {self.finishLocalVerification()}
+            }
             return
         }
+        if let path=argument("--check-native-stream"),let input=argument("--video-fixture"){Task{@MainActor in await checkNativeStream(path,fixture:URL(fileURLWithPath:input))};return}
+        if let path=argument("--check-v09") {Task { @MainActor in await checkV09(path)};return}
+        if let path=argument("--check-session-storage") {Task { @MainActor in await checkSessionStorage(path)};return}
+        if let path=argument("--check-cold-stream") {Task { @MainActor in await checkColdStream(path)};return}
+        if let path=argument("--check-resource-lifecycle") {Task { @MainActor in await checkResourceLifecycle(path)};return}
+        if let path=argument("--check-resources") {Task { @MainActor in await checkResources(path)};return}
+        if let path=argument("--check-public-hd") {Task { @MainActor in await checkPublicHD(path)};return}
+        if let path=argument("--check-video-quality"),let fixture=argument("--video-fixture"),let audio=argument("--audio-fixture") {Task { @MainActor in await checkVideoQuality(path,fixture:URL(fileURLWithPath:fixture),audio:URL(fileURLWithPath:audio))};return}
+        if let path=argument("--check-video"),let fixture=argument("--video-fixture") {Task { @MainActor in await checkVideo(path,fixture:URL(fileURLWithPath:fixture))};return}
+        if let path=argument("--check-public-video") {Task { @MainActor in await checkPublicVideo(path)};return}
+        if let path=argument("--check-transport") {Task { @MainActor in await checkTransport(path)};return}
         if let path=argument("--check-display") {checkDisplay(path);return}
         if let path=argument("--check-group") {DispatchQueue.main.asyncAfter(deadline:.now()+0.3) {self.checkWindowGroup(path)};return}
         if let path=argument("--check-windows") {DispatchQueue.main.asyncAfter(deadline:.now()+0.3) {self.checkWindows(path)};return}
@@ -407,6 +497,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
         }
         if let path=argument("--check-ui") {checkUI(path);return}
         if let path=argument("--render") {saveRender(path);NSApp.terminate(nil);return}
+        if CommandLine.arguments.contains("--ui-preview") {updateFavoriteButton();return}
         if let path=argument("--verify") {
             verificationPath=path;engine.mute(true);status("ПЕРЕВІРКА ПОШУКУ ТА ВІДТВОРЕННЯ…")
             Task { @MainActor in
@@ -435,10 +526,10 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
             }
             return
         }
+        if !library.tracks.isEmpty {queue=library.tracks;setPage(MusicPage(items:queue,continuation:nil),title:"LOCAL FILES",endpoint:"local");status("ВІДНОВЛЕНО \(queue.count) ЛОКАЛЬНИХ ФАЙЛІВ")}
         let explicitStartupSkin=pendingFileURLs.contains {$0.pathExtension.lowercased()=="wsz"}
         if !pendingFileURLs.isEmpty {let urls=pendingFileURLs;pendingFileURLs=[];importFiles(urls)}
         if let path=argument("--skin") {loadSkin(URL(fileURLWithPath:path),persist:false)} else if !explicitStartupSkin {let url=skinStorageURL;if FileManager.default.fileExists(atPath:url.path) {loadSkin(url,persist:false)}}
-        if current?.localURL==nil {engine.warm()}
         var storedCredentials:SessionCredentials?
         do {storedCredentials=try KeychainSession.load();if storedCredentials != nil,storedCredentials?.browserCookies==nil {status("ОНОВІТЬ ВХІД ЧЕРЕЗ GOOGLE")}} catch {status(error.localizedDescription)}
         if let credentials=storedCredentials,credentials.browserCookies != nil {
@@ -453,7 +544,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
                     await engine.installSession(credentials,preserveLocal:true)
                     guard !Task.isCancelled,generation==sessionGeneration else {return}
                     self.credentials=credentials;installingSession=false
-                    if let active=current {if let id=active.videoID {engine.play(id)}} else {resetPlaybackDisplay();setPage(page,title:"MY PLAYLISTS",endpoint:"browse");status("СЕСІЮ ПІДКЛЮЧЕНО • YOUTUBE MUSIC")}
+                    if let active=current {if let id=active.videoID {engine.play(id)}} else if library.tracks.isEmpty {resetPlaybackDisplay();setPage(page,title:"MY PLAYLISTS",endpoint:"browse");status("СЕСІЮ ПІДКЛЮЧЕНО • YOUTUBE MUSIC")} else {status("GOOGLE ПІДКЛЮЧЕНО • ЛОКАЛЬНІ ФАЙЛИ ЗБЕРЕЖЕНО")}
                 } catch {if !Task.isCancelled,generation==sessionGeneration {self.credentials=nil;installingSession=false;status(error.localizedDescription)}}
             }
         }
@@ -461,10 +552,15 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
     func argument(_ name:String)->String? {guard let i=CommandLine.arguments.firstIndex(of:name),CommandLine.arguments.indices.contains(i+1) else {return nil};return CommandLine.arguments[i+1]}
     func setUpMenu() {
         let menu=NSMenu();let appItem=NSMenuItem();menu.addItem(appItem)
-        let appMenu=NSMenu();appMenu.addItem(NSMenuItem(title:"Завершити Retroamp",action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q"));appItem.submenu=appMenu
+        let appMenu=NSMenu();let settings=NSMenuItem(title:"Налаштування…",action:#selector(showSettings),keyEquivalent:",");settings.target=self;appMenu.addItem(settings);appMenu.addItem(.separator());appMenu.addItem(NSMenuItem(title:"Завершити Retroamp",action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q"));appItem.submenu=appMenu
         let fileItem=NSMenuItem();fileItem.title="Файл";let fileMenu=NSMenu(title:"Файл")
-        let open=NSMenuItem(title:"Відкрити аудіофайли…",action:#selector(openLocalFiles),keyEquivalent:"o");open.target=self;fileMenu.addItem(open);fileItem.submenu=fileMenu;menu.addItem(fileItem)
-        let editItem=NSMenuItem();editItem.title="Редагування";let edit=NSMenu();edit.addItem(NSMenuItem(title:"Вирізати",action:#selector(NSText.cut(_:)),keyEquivalent:"x"));edit.addItem(NSMenuItem(title:"Копіювати",action:#selector(NSText.copy(_:)),keyEquivalent:"c"));edit.addItem(NSMenuItem(title:"Вставити",action:#selector(NSText.paste(_:)),keyEquivalent:"v"));edit.addItem(NSMenuItem(title:"Вибрати все",action:#selector(NSText.selectAll(_:)),keyEquivalent:"a"));editItem.submenu=edit;menu.addItem(editItem);addAppearanceMenu(to:menu);NSApp.mainMenu=menu
+        let open=NSMenuItem(title:"Додати аудіофайли або папки…",action:#selector(openLocalFiles),keyEquivalent:"o");open.target=self;fileMenu.addItem(open)
+        let folder=NSMenuItem(title:"Додати папку з альбомами…",action:#selector(openLocalFolder),keyEquivalent:"O");folder.target=self;fileMenu.addItem(folder)
+        let more=NSMenuItem(title:"Завантажити ще з YouTube Music",action:#selector(loadMore),keyEquivalent:"");more.target=self;fileMenu.addItem(more);fileItem.submenu=fileMenu;menu.addItem(fileItem)
+        let editItem=NSMenuItem();editItem.title="Редагування";let edit=NSMenu();edit.addItem(NSMenuItem(title:"Вирізати",action:#selector(NSText.cut(_:)),keyEquivalent:"x"));edit.addItem(NSMenuItem(title:"Копіювати",action:#selector(NSText.copy(_:)),keyEquivalent:"c"));edit.addItem(NSMenuItem(title:"Вставити",action:#selector(NSText.paste(_:)),keyEquivalent:"v"));edit.addItem(NSMenuItem(title:"Вибрати все",action:#selector(NSText.selectAll(_:)),keyEquivalent:"a"));editItem.submenu=edit;menu.addItem(editItem);addAppearanceMenu(to:menu)
+        let windowsItem=NSMenuItem();windowsItem.title="Вікно";let windowsMenu=NSMenu(title:"Вікно")
+        for (title,selector,key) in [("Плеєр",#selector(focusPlayer),"1"),("Еквалайзер",#selector(focusEqualizer),"2"),("Плейлист",#selector(focusPlaylist),"3"),("VIDEO",#selector(focusVideo),"4")] {let item=NSMenuItem(title:title,action:selector,keyEquivalent:key);item.target=self;windowsMenu.addItem(item)}
+        windowsItem.submenu=windowsMenu;menu.addItem(windowsItem);NSApp.mainMenu=menu
     }
     func numberOfRows(in tableView:NSTableView)->Int {view.rows.count}
     func tableView(_ tableView:NSTableView,viewFor tableColumn:NSTableColumn?,row:Int)->NSView? {
@@ -475,7 +571,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
         for row in 0..<table.numberOfRows {if let label=table.view(atColumn:0,row:row,makeIfNecessary:false) as? NSTextField {label.textColor=table.selectedRow==row ? .white : (activeSkin?.textColor ?? green)}}
     }
     var table:NSTableView {view.table}
-    func status(_ text:String) {view.status=text;view.needsDisplay=true}
+    func status(_ text:String,holdFor:Double=3) {statusHoldUntil=Date().addingTimeInterval(holdFor);view.status=text;view.needsDisplay=true}
     func setPage(_ page:MusicPage,title:String,endpoint:String,append:Bool=false) {
         if append {let old=Set(items.map(\.id));items+=page.items.filter {!old.contains($0.id)}} else {items=page.items}
         continuation=page.continuation;self.endpoint=endpoint;view.sectionTitle=title;view.rows=items.map {!$0.isPlayable ? "▸ "+$0.line : $0.line};view.needsDisplay=true
@@ -485,24 +581,29 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
         let index=view.table.selectedRow
         guard items.indices.contains(index) else {return}
         let item=items[index]
-        if item.isPlayable {queue=items.filter { $0.isPlayable };queueIndex=queue.firstIndex(where: {$0.id==item.id}) ?? 0;play(item)}
+        if item.isPlayable {configureQueue(items.filter { $0.isPlayable },starting:item);play(item)}
         else if let browseID=item.browseID {loadBrowse(browseID,title:item.title)}
     }
     func play(_ item:MusicItem) {
-        guard !installingSession else {status("ПІДКЛЮЧАЮ СЕСІЮ…");return}
+        guard !streamTerminating,!installingSession else{return}
         guard item.isPlayable else {return}
-        view.resetMarquees();current=item;endHandled=false;lastState=nil;requestedPlaybackAt=Date();view.titleLine=item.title;view.artistLine=item.subtitle;view.updateClock(time:0,duration:0);view.seek.value=0;view.durationLine="";view.needsDisplay=true;view.formatLine=item.localURL==nil ? "STREAM / STEREO" : "LOCAL / "+(item.localURL?.pathExtension.uppercased() ?? "AUDIO");status("ВІДКРИВАЮ АУДІО…");if let url=item.localURL {engine.playLocal(url)} else if let id=item.videoID {engine.play(id)}
+        previousRewind=nil;transportIntent = .playing;view.hasSource=false;view.updateTransport(.loading)
+        view.resetMarquees();view.spectrumDynamics.reset();view.spectrumInput=Array(repeating:0,count:37);current=item;updateVideoTrack();updateFavoriteButton();mediaControls.clear();endHandled=false;lastState=nil;requestedPlaybackAt=Date();view.titleLine=item.title;view.artistLine=item.subtitle;view.updateClock(time:0,duration:0);view.seek.value=0;view.durationLine="";view.needsDisplay=true;view.formatLine=item.localURL==nil ? "STREAM / STEREO" : "LOCAL / "+(item.localURL?.pathExtension.uppercased() ?? "AUDIO");status("ВІДКРИВАЮ АУДІО…");if let url=item.localURL {engine.playLocal(url)} else if let id=item.videoID {engine.play(id)}
     }
+    func refreshMediaCommands() {mediaControls.update(item:current,state:lastState,canNext:queueIndex+1<queue.count || repeatMode==1,canPrevious:lastState?.ad != true)}
     func receive(_ state:PlaybackState) {
         guard !installingSession,!finishingVerification else {return}
-        lastState=state
+        let unchanged=lastState==state
+        lastState=state;refreshMediaCommands()
+        guard !unchanged else {return}
+        videoPanel.caption.stringValue=(current?.title ?? "VIDEO")+" · "+format(state.time)+" · "+(state.paused ? "PAUSE" : "PLAY")
         view.hasSource=state.hasSource
-        view.isPlaying=state.hasSource && !state.paused
+        if state.hasSource {view.updateTransport(state.ended || transportIntent == .stopped ? .stopped : state.paused ? .paused : .playing)}
+        else if view.transportState != .failed {view.updateTransport(current==nil ? .idle : transportIntent == .paused ? .paused : transportIntent == .stopped ? .stopped : .loading)}
         view.updateClock(time:state.time,duration:state.duration);view.durationLine=state.duration>0 ? format(state.duration) : "";view.seek.value=state.duration>0 ? min(1,state.time/state.duration) : 0
         if state.ad {view.titleLine="РЕКЛАМА • YOUTUBE MUSIC";view.artistLine="Відтворення продовжиться після реклами."}
         else {view.titleLine=state.title.isEmpty ? (current?.title ?? "YOUTUBE MUSIC") : state.title;view.artistLine=state.artist.isEmpty ? (current?.subtitle ?? "") : state.artist}
-        if !state.error.isEmpty {status(state.error)} else if state.hasSource {status(state.ad ? "РЕКЛАМА" : (state.paused ? "ПАУЗА • " : "ВІДТВОРЕННЯ • ")+(current?.localURL==nil ? "YOUTUBE MUSIC" : "ЛОКАЛЬНИЙ ФАЙЛ"))}
-        view.needsDisplay=true
+        if !state.error.isEmpty {status(state.error)} else if state.hasSource,Date()>=statusHoldUntil {status(state.ad ? "РЕКЛАМА" : (state.paused ? "ПАУЗА • " : "ВІДТВОРЕННЯ • ")+(current?.localURL==nil ? "YOUTUBE MUSIC" : "ЛОКАЛЬНИЙ ФАЙЛ"),holdFor:0)}
         if verificationPath != nil {if CommandLine.arguments.contains("--verify-local") {verifyLocalState(state)} else {verifyState(state)};return}
         if state.ended && !state.ad && !endHandled {endHandled=true;if repeatMode==2 {engine.restart();endHandled=false} else {advance(1,automatic:true)}}
     }
@@ -511,7 +612,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
         guard !queue.isEmpty else {return}
         var target=queueIndex+direction
         if target<0 {target=0}
-        if target>=queue.count {if repeatMode==1 {target=0} else {engine.pause();if !automatic {status("КІНЕЦЬ ЧЕРГИ")};return}}
+        if target>=queue.count {if repeatMode==1 {target=0} else {transportIntent=automatic ? .stopped : .paused;view.updateTransport(transportIntent);engine.pause();if !automatic {status("КІНЕЦЬ ЧЕРГИ")};return}}
         queueIndex=target;play(queue[target])
     }
     func loadBrowse(_ id:String,title:String) {
@@ -528,43 +629,43 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
         case "minimize":window.miniaturize(nil)
         case "toggleEQ":view.eqVisible.toggle();view.arrangeModules()
         case "togglePlaylist":view.playlistVisible.toggle();view.arrangeModules()
+        case "toggleVideo":setVideoVisible(!videoVisible)
         case "volume":engine.volume(view.volume.value)
-        case "seek":if lastState?.hasSource != true {view.seek.value=0;status("СПОЧАТКУ ВІДКРИЙТЕ ТРЕК")} else if lastState?.ad != true {engine.seek(view.seek.value)}
-        case "play":if current != nil {engine.resume()} else {activateSelection();if current==nil {status("ОБЕРІТЬ ТРЕК У СПИСКУ • ПОДВІЙНИЙ КЛІК")}}
-        case "pause":engine.pause()
-        case "stop":engine.stop()
+        case "seek":previousRewind=nil;if lastState?.hasSource != true {view.seek.value=0;status("СПОЧАТКУ ВІДКРИЙТЕ ТРЕК")} else if lastState?.ad != true {engine.seek(view.seek.value)}
+        case "play":if current != nil {transportIntent = .playing;view.updateTransport(.loading);engine.resume()} else {activateSelection();if current==nil {status("ОБЕРІТЬ ТРЕК У СПИСКУ • ПОДВІЙНИЙ КЛІК")}}
+        case "pause":if current != nil {transportIntent = .paused;view.updateTransport(.paused)};engine.pause()
+        case "stop":if current != nil {transportIntent = .stopped;view.updateTransport(.stopped)};engine.stop()
+        case "togglePlayback":act([TransportState.idle,.stopped,.failed].contains(view.transportState) ? "play" : transportIntent == .playing ? "pause" : "play")
         case "next":advance(1)
-        case "previous":advance(-1)
-        case "repeat":repeatMode=(repeatMode+1)%3;status(["ПОВТОРЕННЯ ВИМКНЕНО","ПОВТОРЮВАТИ ЧЕРГУ","ПОВТОРЮВАТИ ОДИН ТРЕК"][repeatMode])
-        case "shuffle":guard !queue.isEmpty else {status("СПОЧАТКУ ВІДКРИЙТЕ ТРЕК");return};let active=current;queue.shuffle();queueIndex=queue.firstIndex(where:{$0.id==active?.id}) ?? 0;status("ЧЕРГУ ПЕРЕМІШАНО")
+        case "previous":previousTrack()
+        case "repeat":repeatMode=(repeatMode+1)%3;view.updateModes(shuffle:shuffleEnabled,repeatMode:repeatMode);refreshMediaCommands();status(["ПОВТОРЕННЯ ВИМКНЕНО","ПОВТОРЮВАТИ ЧЕРГУ","ПОВТОРЮВАТИ ОДИН ТРЕК"][repeatMode])
+        case "shuffle":toggleShuffle()
         case "queue":requestGeneration+=1;requestTask?.cancel();setPage(MusicPage(items:queue,continuation:nil),title:"PLAYLIST EDITOR",endpoint:"browse")
         case "search":let query=view.query.stringValue.trimmingCharacters(in:.whitespacesAndNewlines);guard !query.isEmpty else {window.makeFirstResponder(view.query);return};requestGeneration+=1;let generation=requestGeneration;requestTask?.cancel();status("ШУКАЮ…");requestTask=Task { @MainActor in do {let page=try await service.search(query);guard !Task.isCancelled,generation==requestGeneration else {return};setPage(page,title:"SEARCH RESULTS",endpoint:"search");status(page.items.isEmpty ? "НІЧОГО НЕ ЗНАЙДЕНО" : "\(page.items.count) РЕЗУЛЬТАТІВ • ПОДВІЙНИЙ КЛІК ДЛЯ ВІДТВОРЕННЯ")}catch {if !Task.isCancelled,generation==requestGeneration {status(error.localizedDescription)}}}
         case "more":guard let token=continuation else {status("БІЛЬШЕ ЕЛЕМЕНТІВ НЕМАЄ");return};requestGeneration+=1;let generation=requestGeneration,route=endpoint,title=view.sectionTitle;requestTask?.cancel();status("ЗАВАНТАЖУЮ ДАЛІ…");requestTask=Task { @MainActor in do {let page=try await service.more(token,endpoint:route);guard !Task.isCancelled,generation==requestGeneration else {return};setPage(page,title:title,endpoint:route,append:true);status("ЗАВАНТАЖЕНО \(items.count) ЕЛЕМЕНТІВ")}catch {if !Task.isCancelled,generation==requestGeneration {status(error.localizedDescription)}}}
-        case "library":if credentials==nil {showConnection()} else {showLibraryMenu()}
+        case "favorite":addCurrentFavorite()
+        case "library":showLibraryMenu()
         case "openFiles":openLocalFiles()
         case "connect":showConnection()
         default:break
         }
     }
     @objc func openLocalFiles() {
-        guard window.attachedSheet==nil,!installingSession else {return}
-        let panel=NSOpenPanel();panel.allowedContentTypes=[.audio];panel.allowsMultipleSelection=true;panel.canChooseDirectories=false;panel.prompt="Додати";panel.title="Відкрити локальні аудіофайли"
-        panel.beginSheetModal(for:window) {[weak self] response in if response == .OK {let urls=panel.urls;DispatchQueue.main.async {self?.importFiles(urls)}} }
+        chooseLocalFiles(foldersOnly:false)
     }
     @discardableResult func importFiles(_ urls:[URL],autoplay:Bool=true)->Bool {
         guard !installingSession,window.attachedSheet==nil else {status("СПОЧАТКУ ЗАВЕРШІТЬ ВХІД");return false}
         if let skin=urls.first(where:{$0.pathExtension.lowercased()=="wsz"}) {loadSkin(skin);if urls.count==1 {return true}}
-        let extensions:Set<String>=["mp3","m4a","aac","wav","wave","aiff","aif","flac","caf"]
-        let tracks=urls.filter {$0.isFileURL && extensions.contains($0.pathExtension.lowercased())}.map {url in
-            MusicItem(id:url.standardizedFileURL.absoluteString,title:url.deletingPathExtension().lastPathComponent,subtitle:"Локальний файл",videoID:nil,browseID:nil,duration:"",localURL:url)
+        requestGeneration+=1;let navigation=requestGeneration;requestTask?.cancel()
+        let previous=importTask
+        status("СКАНУЮ АУДІОФАЙЛИ Й ПАПКИ…")
+        importTask=Task { @MainActor [weak self] in
+            await previous?.value
+            guard !Task.isCancelled,let self else {return}
+            let result=await Task.detached(priority:.userInitiated) {LocalImporter.collect(urls)}.value
+            guard !Task.isCancelled else {return}
+            self.applyImport(result,autoplay:autoplay,navigation:navigation)
         }
-        guard !tracks.isEmpty else {status("ОБЕРІТЬ MP3, M4A, WAV, AIFF, FLAC АБО CAF");return false}
-        requestGeneration+=1;requestTask?.cancel()
-        var seen=Set(queue.map(\.id));let new=tracks.filter {seen.insert($0.id).inserted}
-        queue+=new
-        setPage(MusicPage(items:queue,continuation:nil),title:"PLAYLIST EDITOR",endpoint:"local")
-        status("ДОДАНО \(new.count) ЛОКАЛЬНИХ ФАЙЛІВ")
-        if autoplay,current==nil,let first=queue.first {queueIndex=0;play(first)}
         return true
     }
     func application(_ sender:NSApplication,openFiles filenames:[String]) {
@@ -573,20 +674,46 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
     }
     func showLibraryMenu() {
         let menu=NSMenu()
+        for (name,action) in [("Локальні файли",#selector(showLocalLibrary)),("Улюблені Retroamp",#selector(showFavorites)),("Додати папку…",#selector(openLocalFolder)),("Завантажити ще",#selector(loadMore))] {let item=NSMenuItem(title:name,action:action,keyEquivalent:"");item.target=self;menu.addItem(item)}
+        menu.addItem(.separator())
         for (name,id) in [("Мої плейлисти","FEmusic_liked_playlists"),("Збережені пісні","FEmusic_liked_videos"),("Альбоми","FEmusic_liked_albums"),("Улюблені пісні","VLLM")] {
             let item=NSMenuItem(title:name,action:#selector(libraryChoice(_:)),keyEquivalent:"");item.target=self;item.representedObject=id;menu.addItem(item)
         }
         menu.addItem(.separator());let disconnect=NSMenuItem(title:"Відключити сесію",action:#selector(disconnectSession),keyEquivalent:"");disconnect.target=self;menu.addItem(disconnect);menu.popUp(positioning:nil,at:NSPoint(x:235,y:view.playlistView.bounds.height-42),in:view.playlistView)
     }
-    @objc func libraryChoice(_ sender:NSMenuItem) {if let id=sender.representedObject as? String {loadBrowse(id,title:sender.title)}}
+    @objc func libraryChoice(_ sender:NSMenuItem) {if credentials==nil {showConnection();return};if let id=sender.representedObject as? String {loadBrowse(id,title:sender.title)}}
     func showConnection() {
-        guard connection==nil else {return}
+        guard connection==nil,!installingSession else {return}
         let sheet=ConnectionPanel();connection=sheet;authTask=nil
         sheet.cancelled={ [weak self] in self?.cancelConnection() }
+        sheet.restored={ [weak self,weak sheet] in
+            guard let self,let sheet,self.authTask==nil else {return}
+            sheet.google.isEnabled=false;sheet.restore.isEnabled=false
+            self.sessionGeneration+=1;let generation=self.sessionGeneration;self.startupTask?.cancel();self.favoriteTask?.cancel()
+            self.authTask=Task { @MainActor [self] in
+                do {
+                    guard let saved=try KeychainSession.load(allowInteraction:true),saved.browserCookies != nil else {throw MusicError.message("Немає збереженої повної сесії. Натисніть «Увійти через Google».")}
+                    guard !Task.isCancelled,generation==self.sessionGeneration else {return}
+                    sheet.message.stringValue="Перевіряю збережену сесію YouTube Music…"
+                    let page=try await self.service.authenticate(saved)
+                    guard !Task.isCancelled,generation==self.sessionGeneration else {return}
+                    self.installingSession=true;self.requestGeneration+=1;self.requestTask?.cancel()
+                    // Validation succeeded. Close the cancellable panel before committing the session.
+                    sheet.cancel.isEnabled=false
+                    self.window.endSheet(sheet);sheet.orderOut(nil);self.connection=nil
+                    guard await self.commitRestoredSession(generation:generation,serviceInstall:{await self.service.setSession(saved)},engineInstall:{await self.engine.installSession(saved,preserveLocal:true)}) else {return}
+                    self.credentials=saved;self.installingSession=false;self.authTask=nil
+                    if let active=self.current {if let id=active.videoID {self.engine.play(id)}} else if self.library.tracks.isEmpty {self.setPage(page,title:"MY PLAYLISTS",endpoint:"browse")}
+                    self.status("ЗБЕРЕЖЕНИЙ ВХІД ВІДНОВЛЕНО • GOOGLE")
+                } catch {
+                    if !Task.isCancelled,generation==self.sessionGeneration {sheet.message.stringValue=error.localizedDescription;sheet.google.isEnabled=true;sheet.restore.isEnabled=true;self.authTask=nil;self.installingSession=false}
+                }
+            }
+        }
         sheet.submitted={ [weak self,weak sheet] in
             guard let self,let sheet,self.authTask==nil else {return}
-            sheet.google.isEnabled=false
-            sessionGeneration+=1;let generation=sessionGeneration;startupTask?.cancel()
+            sheet.google.isEnabled=false;sheet.restore.isEnabled=false
+            sessionGeneration+=1;let generation=sessionGeneration;startupTask?.cancel();favoriteTask?.cancel()
             googleLogin.onStatus={ [weak sheet] message in sheet?.message.stringValue=message }
             self.authTask=Task { @MainActor [self] in
                 do {
@@ -596,11 +723,10 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
                     guard !Task.isCancelled,generation==self.sessionGeneration else {return}
                     self.googleLogin.cancel();self.credentials=candidate;self.installingSession=true;self.requestGeneration+=1;self.requestTask?.cancel()
                     self.window.endSheet(sheet);sheet.orderOut(nil);self.connection=nil
-                    await self.service.setSession(candidate);await self.engine.installSession(candidate)
-                    guard !Task.isCancelled,generation==self.sessionGeneration else {return}
+                    guard await self.commitRestoredSession(generation:generation,serviceInstall:{await self.service.setSession(candidate)},engineInstall:{await self.engine.installSession(candidate)}) else {return}
                     self.installingSession=false;self.authTask=nil;self.resetPlaybackDisplay();self.setPage(page,title:"MY PLAYLISTS",endpoint:"browse");self.status("GOOGLE ПІДКЛЮЧЕНО")
                 } catch {
-                    if !Task.isCancelled,generation==self.sessionGeneration {self.googleLogin.cancel();sheet.message.stringValue=error.localizedDescription;sheet.google.isEnabled=true;self.authTask=nil;self.installingSession=false}
+                    if !Task.isCancelled,generation==self.sessionGeneration {self.googleLogin.cancel();sheet.message.stringValue=error.localizedDescription;sheet.google.isEnabled=true;sheet.restore.isEnabled=true;self.authTask=nil;self.installingSession=false}
                 }
             }
         }
@@ -614,14 +740,17 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
     func resetPlaybackDisplay() {
         view.resetMarquees()
         current=nil;lastState=nil;queue=[];queueIndex = -1;endHandled=false
+        updateVideoTrack()
+        previousRewind=nil;orderedQueue=[];transportIntent = .idle;view.updateTransport(.idle)
+        mediaControls.clear();view.spectrumDynamics.reset();view.spectrumInput=Array(repeating:0,count:37);updateFavoriteButton()
         view.spectrum=Array(repeating:0,count:37);view.peaks=Array(repeating:0,count:37);view.updateClock(time:0,duration:0);view.durationLine="";view.isPlaying=false;view.hasSource=false;view.seek.value=0
         view.titleLine="YOUTUBE MUSIC";view.artistLine="Оберіть трек у списку.";view.needsDisplay=true
     }
     func handlesTransportKey(_ event:NSEvent)->Bool {
-        event.keyCode==49 && [window,equalizerWindow,playlistWindow].contains(where:{$0 === event.window}) && window.attachedSheet==nil && !(event.window?.firstResponder is NSTextView) && event.modifierFlags.intersection([.command,.option,.control]).isEmpty
+        transportKeyAction(event) != nil
     }
     @objc func disconnectSession() {
-        cancelConnection();sessionGeneration+=1;authTask?.cancel();startupTask?.cancel();installingSession=false;requestGeneration+=1;requestTask?.cancel()
+        cancelConnection();sessionGeneration+=1;authTask?.cancel();startupTask?.cancel();favoriteTask?.cancel();installingSession=false;requestGeneration+=1;requestTask?.cancel()
         do {try KeychainSession.delete();credentials=nil;resetPlaybackDisplay();engine.pause();Task { @MainActor in await service.setSession(nil);await engine.installSession(nil)};setPage(MusicPage(items:[],continuation:nil),title:"PLAYLIST EDITOR",endpoint:"search");view.titleLine="YOUTUBE MUSIC";view.artistLine="Сесію відключено.";view.updateClock(time:0,duration:0);status("СЕСІЮ ВИДАЛЕНО З KEYCHAIN")} catch {status(error.localizedDescription)}
     }
     func checkUI(_ path:String) {
@@ -713,7 +842,21 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSTableViewDataSource,NST
         saveRender(URL(fileURLWithPath:path).deletingLastPathComponent().appendingPathComponent("native-runtime.png").path)
         NSApp.terminate(nil)
     }
-    func applicationWillTerminate(_ notification:Notification) {requestTask?.cancel();authTask?.cancel();startupTask?.cancel();skinTask?.cancel();googleLogin.cancel();view.spectrumTimer?.invalidate();engine.shutdown();if let eventMonitor {NSEvent.removeMonitor(eventMonitor)}}
+    func cancelWorkForTermination(){
+        sessionGeneration+=1;requestGeneration+=1
+        startupTask?.cancel();authTask?.cancel();requestTask?.cancel();favoriteTask?.cancel();importTask?.cancel();skinTask?.cancel();googleLogin.cancel()
+    }
+    private var streamTerminating=false,streamCanExit=false
+    func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply {
+        if streamCanExit{return .terminateNow}
+        if !streamTerminating {
+            streamTerminating=true;cancelWorkForTermination();engine.beginShutdown()
+            Task{@MainActor in if await engine.shutdownStreaming(){streamCanExit=true;NSApp.terminate(nil)}else{streamTerminating=false;status("Джерело ще завершується. Повторіть закриття.")}}
+        }
+        // Returning first lets the MainActor drain even when quit originated in a Swift task.
+        return .terminateCancel
+    }
+    func applicationWillTerminate(_ notification:Notification) {importTask?.cancel();favoriteTask?.cancel();mediaControls.shutdown();requestTask?.cancel();authTask?.cancel();startupTask?.cancel();skinTask?.cancel();googleLogin.cancel();view.spectrumTimer?.invalidate();engine.shutdown();if let eventMonitor {NSEvent.removeMonitor(eventMonitor)}}
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {window.deminiaturize(nil);showModules();window.makeKeyAndOrderFront(nil);return true}
     func applicationShouldTerminateAfterLastWindowClosed(_ sender:NSApplication)->Bool {true}
 }

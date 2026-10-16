@@ -110,6 +110,7 @@ import AppKit
 
 @MainActor extension AppDelegate {
     func checkWindowGroup(_ path:String) {
+        arrangeWindows(nil)
         let windows=[window!,equalizerWindow!,playlistWindow!],original=windows.map(\.frame),oldPin=windowGroup.alwaysOnTop
         var checks:[String:Any]=[:]
         checks["activeApplication"] = NSApp.isActive
@@ -123,7 +124,7 @@ import AppKit
         checks["playlistCanMoveIndependently"] = window.frame==afterEQ[0] && equalizerWindow.frame==afterEQ[1]
         let beforeResize=windows.map(\.frame);var frame=window.frame;frame.size.height+=32;frame.origin.y-=32;window.setFrame(frame,display:true)
         checks["mainResizeDoesNotMoveCompanions"] = equalizerWindow.frame==beforeResize[1] && playlistWindow.frame==beforeResize[2]
-        playlistWindow.orderOut(nil);let hiddenFrame=playlistWindow.frame,mainFrame=window.frame
+        arrangeWindows(nil);playlistWindow.orderOut(nil);let hiddenFrame=playlistWindow.frame,mainFrame=window.frame
         windowGroup.beginPlayerDrag();window.setFrameOrigin(NSPoint(x:mainFrame.minX+19,y:mainFrame.minY+9));windowGroup.endPlayerDrag()
         checks["hiddenPanelFollowsWithoutBeingShown"] = !playlistWindow.isVisible && playlistWindow.frame.origin==NSPoint(x:hiddenFrame.minX+19,y:hiddenFrame.minY+9)
         playlistWindow.makeKeyAndOrderFront(nil)
