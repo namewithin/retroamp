@@ -5,7 +5,7 @@
 This update includes the local 0.9.x improvements since the published 0.8 source.
 
 - Replace the continuous Chrome playback backend with an app-owned WebKit helper and native Core Audio routing. Chrome is still needed temporarily for a new Google sign-in.
-- Keep the ten-band EQ, preamp and real FFT spectrum on the native audio path. Reduce repeated drawing and reuse bounded audio/analysis buffers.
+- Keep the ten-band EQ, preamp and real FFT spectrum on the native audio path. Reduce repeated drawing and reuse bounded audio/analysis buffers. Restart the native engine on the next playback poll if a hardware-format interruption stops it, while retaining the muting capture tap.
 - Add an independent VIDEO window synchronized to the current track, with AUTO / 720p / 1080p requests and actual decoded resolution. Audio songs can switch to their service-provided official video in the same player.
 - Import nested album folders into a persistent local library; add favorites and YouTube Music likes.
 - Add macOS media-command handling, classic Z/X/C/V/B controls, current-state indicators, visualizer settings and improved attached-window movement.

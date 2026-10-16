@@ -55,7 +55,7 @@ cd retroamp
 
 The script builds for the host architecture and creates `dist/Retroamp-0.10.0.dmg`. Swift is compiled with `-O -whole-module-optimization`. It uses the macOS frameworks and system zlib; no package manager or API key is required. Set `RETROAMP_OUTPUT_DIR` to choose another output directory. For a local app-only build, set `RETROAMP_APP_DIR=/private/tmp/retroamp-build RETROAMP_SKIP_DMG=1`. The helper is embedded, signed and verified against its build-time SHA-256 before launch.
 
-GitHub Actions builds the host-architecture app and runs the isolated, silent native-DSP check on Apple Silicon and Intel macOS runners. It does not test a Google account or system-audio capture. To run that check locally, see [validation notes](docs/VALIDATION.md#reproducing-the-offline-dsp-check).
+GitHub Actions builds the host-architecture app and runs isolated, silent regressions on Apple Silicon and Intel macOS runners: 16 native-DSP assertions, 13 synthetic session assertions and 40 local-library/media-command/visualizer/window assertions. Checks run whenever a PR opens, is reopened or receives a new commit, and on pushes to `main`. Logs, JSON results and synthetic UI renders are uploaded as artifacts. It does not test a Google account or system-audio capture. To run that check locally, see [validation notes](docs/VALIDATION.md#reproducing-the-offline-dsp-check).
 
 The build is ad-hoc signed. Developer ID signing, notarization and automatic updates are not configured. If macOS blocks a locally built app, use the normal macOS approval flow after reviewing the code.
 

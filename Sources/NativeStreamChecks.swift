@@ -57,6 +57,11 @@ import AppKit
             frames=0;configureQueue([second],starting:second);play(second)
             try await waitFor{frames>=3 && (self.lastState?.time ?? 0)>0.3}
             checks["fullNavigationReactivatesNativePCM"]=frames>=3 && (c.sourceInfo["documentGeneration"]as?Int ?? -1)>firstDocument
+            // AVAudioEngine stops itself after hardware format changes. Exercise the
+            // real polling/ensureAudio recovery path without changing the user's devices.
+            frames=0;c.audio.dsp?.engine.stop()
+            try await waitFor{c.audio.dsp?.engine.isRunning==true && frames>=3}
+            checks["stoppedNativeEngineAutomaticallyRecoversPCM"]=c.audio.dsp?.engine.isRunning==true && frames>=3 && c.audio.started && (c.audio.dsp?.engine.mainMixerNode.outputVolume ?? 1)==0
             _=try await c.evaluate("document.querySelector('video').pause=()=>{throw new Error('synthetic shutdown failure')};({})")
             let before=c.process.processIdentifier
             await engine.installSession(nil)
@@ -74,7 +79,7 @@ import AppKit
             engine.beginShutdown();engine.play("fixture0003");engine.playLocal(fixture)
             try await Task.sleep(nanoseconds:200_000_000)
             checks["quitBarrierPreventsAnyNewAudioSource"] = !engine.isLocal && engine.streamDiagnostics["connected"]as?Bool==false
-            checks["passed"]=["cookieScopeAndSecurityAttributesSurviveMigration","unrelatedCookieDomainRejected","webKitCookieExpiryCapRespected","webKitDrivesRealNativePCM","liveNativeEQChangesSpectrum","oneMediaElementWithoutWebAudioGraph","sourceIsLimitedToOnePercent","nativeOutputRemainsMuted","pausePreservesClockAndTap","seekWhilePaused","resumeAfterSeek","sourceExitsBeforeTapReleased","closedIPCIsIdempotent","fullNavigationReactivatesNativePCM","failedMuteDoesNotClaimQuiet","quitInvalidatesPendingSessionRestore","quitBarrierPreventsAnyNewAudioSource"].allSatisfy{checks[$0]as?Bool==true}
+            checks["passed"]=["cookieScopeAndSecurityAttributesSurviveMigration","unrelatedCookieDomainRejected","webKitCookieExpiryCapRespected","webKitDrivesRealNativePCM","liveNativeEQChangesSpectrum","oneMediaElementWithoutWebAudioGraph","sourceIsLimitedToOnePercent","nativeOutputRemainsMuted","pausePreservesClockAndTap","seekWhilePaused","resumeAfterSeek","sourceExitsBeforeTapReleased","closedIPCIsIdempotent","fullNavigationReactivatesNativePCM","stoppedNativeEngineAutomaticallyRecoversPCM","failedMuteDoesNotClaimQuiet","quitInvalidatesPendingSessionRestore","quitBarrierPreventsAnyNewAudioSource"].allSatisfy{checks[$0]as?Bool==true}
         }catch{checks["passed"]=false;checks["failureState"]=["time":lastState?.time ?? -1,"paused":lastState?.paused ?? true,"hasSource":lastState?.hasSource ?? false,"signalFrames":frames];checks["error"]=error.localizedDescription;checks["bridgeFailure"]=(error as?CDPFailure)?.diagnostic ?? engine.lastBridgeFailure ?? "none"}
         engine.onSpectrum=receiveSpectrum;writeCheck(checks,path:path);NSApp.terminate(nil)
     }

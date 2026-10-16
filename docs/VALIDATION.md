@@ -22,6 +22,12 @@ Native partial redraw and layer backing reduced the audio-playing host from 277 
 
 The earlier standalone WebKit/native-audio prototype used about 925–948 MiB. The previous Chrome control used about 891 MiB during audio and 613 MiB during its VIDEO sample. Those are separate workloads/runs, not a controlled comparative benchmark; this migration does **not** establish a universal video-memory improvement. In particular, visible 1080p can still approach 1 GiB. Earlier 1.6–1.8 GiB figures were summed RSS and cannot be compared directly to the physical-footprint table.
 
+## Pre-merge subagent review (2026-10-16)
+
+Three independent read-only subagent reviews covered native capture/DSP, stream/auth/VIDEO, and local library/UI/build delivery at `58571812744aae8cc3554d33d957683ae4a0f8b1`. One P2 was confirmed: hardware format changes can stop AVAudioEngine while the process tap remains active, but the streaming poll previously returned without restarting the engine. The repair makes native start idempotent and checks it during the existing owned-source polling path; no new notification callback or capture teardown is introduced.
+
+An integrated regression deliberately stops only the test DSP engine during real muted WebKit PCM playback. Before repair, the YouTube clock advanced to 12.84 seconds with zero new native spectrum frames and the tap still active; the test failed. It requires automatic restart, new FFT frames, retained tap and zero native output volume. This simulates the documented engine interruption without changing the user's output device. It does not establish real hardware route/sample-rate switching or the full device matrix.
+
 ## Reproducing the offline DSP check
 
 ```sh
@@ -29,7 +35,9 @@ RETROAMP_APP_DIR=/private/tmp/retroamp-build RETROAMP_SKIP_DMG=1 ./build.sh
 python3 scripts/check-offline.py --app /private/tmp/retroamp-build/Retroamp.app --output /private/tmp/retroamp-audio.json
 ```
 
-The script copies and re-signs the app with a separate QA preference domain, runs the production native-DSP check before account/session startup, validates its JSON result and leaves speaker output muted. It does not request system-audio capture or test Google playback. GitHub Actions runs this same check after building on Apple Silicon and Intel macOS runners; its result must be read on the PR. The other live-service checks remain local checks with explicit capture permission.
+The script copies and re-signs the app with fresh QA preference domains, validates individual assertions and rejects empty, shortened or contradictory results. The default suite checks native DSP. Use `--suite all` to run native DSP (16 assertions), synthetic session handling (13) and local library/media-command/visualizer/window behavior (40). Every app process is muted; personal Keychain/session startup is bypassed. The session reader and YouTube-like endpoint use synthetic fixtures. No Google account, system-audio capture or live service is used.
+
+GitHub Actions builds on Apple Silicon and Intel, verifies app/helper signatures, tests the result validator and runs all 69 app assertions for every PR opening/reopening/new commit and push to `main`. It uploads per-suite JSON, logs and synthetic UI renders, including on failure. Its actual result must be read on the PR. Real Google playback, native process-tap routing and hardware keys/output-device changes remain separate checks requiring a suitable environment and permissions.
 
 ## Behavior and safety checks
 

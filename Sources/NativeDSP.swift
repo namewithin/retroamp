@@ -29,7 +29,7 @@ final class NativeDSP {
         eq.globalGain=enabled ? preamp:0
         for(i,band)in eq.bands.enumerated(){band.filterType = .parametric;band.frequency=min(Self.frequencies[i],Float(format.sampleRate*0.475));band.bandwidth=1;band.gain=enabled ? gains[i]:0;band.bypass = !enabled}
     }
-    func start()throws {engine.prepare();try engine.start()}
+    func start()throws {guard !engine.isRunning else{return};engine.prepare();try engine.start()}
     func stop(){engine.stop()}
     deinit{engine.stop();if tapInstalled{eq.removeTap(onBus:0)};ring_destroy(input);ring_destroy(analysed)}
     func spectrum()->[Float] {

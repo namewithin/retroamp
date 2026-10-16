@@ -1,4 +1,4 @@
-name: macOS build and native audio
+name: macOS build and offline regressions
 
 on:
   pull_request:
@@ -32,14 +32,17 @@ jobs:
         run: |
           xcrun swiftc --version
           xcrun --show-sdk-version
+      - name: CI result validation contract
+        run: python3 -m unittest discover -s tests -v
       - name: Build and verify signatures
         run: RETROAMP_APP_DIR="$RUNNER_TEMP/retroamp-build" ./build.sh
-      - name: Native audio, without capture or account access
-        run: python3 scripts/check-offline.py --app "$RUNNER_TEMP/retroamp-build/Retroamp.app" --output "$RUNNER_TEMP/native-audio.json"
+      - name: App regressions, without capture or account access
+        run: python3 scripts/check-offline.py --suite all --app "$RUNNER_TEMP/retroamp-build/Retroamp.app" --output "$RUNNER_TEMP/retroamp-checks/summary.json"
       - name: Save check result
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: native-audio-${{ matrix.runner }}
-          path: ${{ runner.temp }}/native-audio.json
+          name: offline-regressions-${{ matrix.runner }}
+          path: ${{ runner.temp }}/retroamp-checks
+          retention-days: 14
           if-no-files-found: ignore

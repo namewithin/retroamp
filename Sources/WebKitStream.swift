@@ -80,6 +80,9 @@ enum CDPFailure:LocalizedError {
         }
         if audio.started {
             guard sourceInfo["sourcePID"]as?Int32==process.processIdentifier,sourceInfo["gpuPID"]as?Int32==selected.first?.pid else{close();throw MusicError.message("WebKit змінив аудіопроцес. Повторіть відтворення.")}
+            // Hardware format changes can stop AVAudioEngine while the muting tap
+            // remains active. Recover on this owned connection's normal poll.
+            try audio.dsp?.start()
             if sourceInfo["nativePipeActive"]as?Bool != true,sourceInfo["guardVerified"]as?Bool==true{try await activateCurrentDocument()}
             return
         }

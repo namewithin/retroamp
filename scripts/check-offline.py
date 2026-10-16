@@ -1,33 +1,81 @@
 #!/usr/bin/env python3
-"""Run the production DSP checks with isolated preferences and no speaker output."""
+"""Run isolated, silent app regressions without Google or system-audio capture."""
 import argparse
 import json
 import plistlib
 from pathlib import Path
 import subprocess
 import tempfile
+import uuid
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--app', required=True, type=Path)
-parser.add_argument('--output', required=True, type=Path)
-args = parser.parse_args()
-app_source = args.app.resolve()
-output = args.output.resolve()
-output.parent.mkdir(parents=True, exist_ok=True)
-# A previous successful run must not satisfy a failed or timed-out invocation.
-output.unlink(missing_ok=True)
-with tempfile.TemporaryDirectory(prefix='retroamp-offline-') as work:
-    app = Path(work) / 'Retroamp Offline QA.app'
-    subprocess.run(['ditto', '--norsrc', '--noextattr', str(app_source), str(app)], check=True)
-    info = app / 'Contents/Info.plist'
-    properties = plistlib.loads(info.read_bytes())
-    properties['CFBundleIdentifier'] = 'local.retroamp.qa.ci.offline'
-    info.write_bytes(plistlib.dumps(properties))
-    subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(app)], check=True)
-    subprocess.run(['codesign', '--verify', '--strict', '--deep', str(app)], check=True)
-    # This early check path returns before Keychain/service/session startup.
-    subprocess.run([str(app / 'Contents/MacOS/Retroamp'), '--quiet', '--check-audio', str(output)], check=True, timeout=60)
-    result = json.loads(output.read_text())
-    if result.get('passed') is not True:
-        raise SystemExit('Native audio checks failed: ' + json.dumps(result, ensure_ascii=False))
-    print(json.dumps(result, indent=2, sort_keys=True))
+SUITES = {
+    'audio': ('--check-audio', 16),
+    'session': ('--check-session-storage', 13),
+    'library': ('--check-v09', 40),
+}
+
+
+def validate_result(result, minimum):
+    if not isinstance(result, dict) or result.get('passed') is not True:
+        raise ValueError('Check did not report passed=true')
+    assertions = {key: value for key, value in result.items() if key != 'passed'}
+    failed = [key for key, value in assertions.items() if value is not True]
+    if failed or len(assertions) < minimum:
+        raise ValueError(f'Expected at least {minimum} successful assertions; got {len(assertions)}, failed: {failed}')
+    return len(assertions)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--app', required=True, type=Path)
+    parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--suite', choices=[*SUITES, 'all'], default='audio')
+    args = parser.parse_args()
+    output = args.output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.unlink(missing_ok=True)  # Never reuse a prior successful summary.
+    evidence = output.parent / (output.stem + '-suites')
+    evidence.mkdir(exist_ok=True)
+    names = list(SUITES) if args.suite == 'all' else [args.suite]
+    results = {}
+    counts = {}
+    errors = {}
+    with tempfile.TemporaryDirectory(prefix='retroamp-offline-') as work:
+        app = Path(work) / 'Retroamp Offline QA.app'
+        subprocess.run(['ditto', '--norsrc', '--noextattr', str(args.app.resolve()), str(app)], check=True)
+        for name in names:
+            flag, minimum = SUITES[name]
+            directory = evidence / name
+            directory.mkdir(exist_ok=True)
+            result_path = directory / 'result.json'
+            result_path.unlink(missing_ok=True)
+            identifier = 'local.retroamp.qa.ci.' + name + '.' + uuid.uuid4().hex
+            try:
+                # Each suite gets fresh preferences, never the personal app's library.
+                info = app / 'Contents/Info.plist'
+                properties = plistlib.loads(info.read_bytes())
+                properties['CFBundleIdentifier'] = identifier
+                info.write_bytes(plistlib.dumps(properties))
+                subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(app)], check=True)
+                subprocess.run(['codesign', '--verify', '--strict', '--deep', str(app)], check=True)
+                # These flags return before personal Keychain/service/session startup.
+                with (directory / 'app.log').open('w') as log:
+                    subprocess.run([str(app / 'Contents/MacOS/Retroamp'), '--quiet', flag, str(result_path)],
+                                   stdout=log, stderr=subprocess.STDOUT, check=True, timeout=60)
+                results[name] = json.loads(result_path.read_text())
+                counts[name] = validate_result(results[name], minimum)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                errors[name] = str(error)
+            finally:
+                # Only this generated test preference domain can be removed.
+                subprocess.run(['/usr/bin/defaults', 'delete', identifier], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    summary = {'passed': not errors and len(counts) == len(names), 'assertions': counts, 'errors': errors}
+    # Keep the original single-suite result format for existing local commands.
+    document = results[names[0]] if len(names) == 1 and summary['passed'] else summary
+    output.write_text(json.dumps(document, indent=2, sort_keys=True) + '\n')
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if summary['passed'] else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
