@@ -40,35 +40,42 @@ def main():
     results = {}
     counts = {}
     errors = {}
-    with tempfile.TemporaryDirectory(prefix='retroamp-offline-') as work:
-        app = Path(work) / 'Retroamp Offline QA.app'
-        subprocess.run(['ditto', '--norsrc', '--noextattr', str(args.app.resolve()), str(app)], check=True)
-        for name in names:
-            flag, minimum = SUITES[name]
-            directory = evidence / name
-            directory.mkdir(exist_ok=True)
-            result_path = directory / 'result.json'
-            result_path.unlink(missing_ok=True)
-            identifier = 'local.retroamp.qa.ci.' + name + '.' + uuid.uuid4().hex
-            try:
-                # Each suite gets fresh preferences, never the personal app's library.
-                info = app / 'Contents/Info.plist'
-                properties = plistlib.loads(info.read_bytes())
-                properties['CFBundleIdentifier'] = identifier
-                info.write_bytes(plistlib.dumps(properties))
-                subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(app)], check=True)
-                subprocess.run(['codesign', '--verify', '--strict', '--deep', str(app)], check=True)
-                # These flags return before personal Keychain/service/session startup.
-                with (directory / 'app.log').open('w') as log:
-                    subprocess.run([str(app / 'Contents/MacOS/Retroamp'), '--quiet', flag, str(result_path)],
-                                   stdout=log, stderr=subprocess.STDOUT, check=True, timeout=60)
-                results[name] = json.loads(result_path.read_text())
-                counts[name] = validate_result(results[name], minimum)
-            except (OSError, ValueError, subprocess.SubprocessError) as error:
-                errors[name] = str(error)
-            finally:
-                # Only this generated test preference domain can be removed.
-                subprocess.run(['/usr/bin/defaults', 'delete', identifier], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        with tempfile.TemporaryDirectory(prefix='retroamp-offline-') as work:
+            app = Path(work) / 'Retroamp Offline QA.app'
+            subprocess.run(['ditto', '--norsrc', '--noextattr', str(args.app.resolve()), str(app)], check=True, timeout=60)
+            for name in names:
+                flag, minimum = SUITES[name]
+                directory = evidence / name
+                directory.mkdir(exist_ok=True)
+                result_path = directory / 'result.json'
+                result_path.unlink(missing_ok=True)
+                identifier = 'local.retroamp.qa.ci.' + name + '.' + uuid.uuid4().hex
+                try:
+                    # Each suite gets fresh preferences, never the personal app's library.
+                    info = app / 'Contents/Info.plist'
+                    properties = plistlib.loads(info.read_bytes())
+                    properties['CFBundleIdentifier'] = identifier
+                    info.write_bytes(plistlib.dumps(properties))
+                    subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(app)], check=True, timeout=60)
+                    subprocess.run(['codesign', '--verify', '--strict', '--deep', str(app)], check=True, timeout=60)
+                    # These flags return before personal Keychain/service/session startup.
+                    with (directory / 'app.log').open('w') as log:
+                        subprocess.run([str(app / 'Contents/MacOS/Retroamp'), '--quiet', flag, str(result_path)],
+                                       stdout=log, stderr=subprocess.STDOUT, check=True, timeout=60)
+                    results[name] = json.loads(result_path.read_text())
+                    counts[name] = validate_result(results[name], minimum)
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    errors[name] = str(error)
+                finally:
+                    # Only this generated test preference domain can be removed.
+                    try:
+                        subprocess.run(['/usr/bin/defaults', 'delete', identifier], stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, timeout=10)
+                    except (OSError, subprocess.SubprocessError) as error:
+                        errors[name] = (errors.get(name, '') + '; preference cleanup: ' + str(error)).lstrip('; ')
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        errors['setup'] = str(error)
     summary = {'passed': not errors and len(counts) == len(names), 'assertions': counts, 'errors': errors}
     # Keep the original single-suite result format for existing local commands.
     document = results[names[0]] if len(names) == 1 and summary['passed'] else summary

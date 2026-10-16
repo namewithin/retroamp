@@ -57,6 +57,8 @@ The script builds for the host architecture and creates `dist/Retroamp-0.10.0.dm
 
 GitHub Actions builds the host-architecture app and runs isolated, silent regressions on Apple Silicon and Intel macOS runners: 16 native-DSP assertions, 13 synthetic session assertions and 40 local-library/media-command/visualizer/window assertions. Checks run whenever a PR opens, is reopened or receives a new commit, and on pushes to `main`. Logs, JSON results and synthetic UI renders are uploaded as artifacts. It does not test a Google account or system-audio capture. To run that check locally, see [validation notes](docs/VALIDATION.md#reproducing-the-offline-dsp-check).
 
+Unit checks also exercise failed result validation, timed-out test setup/cleanup, and real unread/broken pipes. IPC writes use a bounded background queue and deadlines so a stalled WebKit helper cannot block the player’s main thread.
+
 The build is ad-hoc signed. Developer ID signing, notarization and automatic updates are not configured. If macOS blocks a locally built app, use the normal macOS approval flow after reviewing the code.
 
 ## Use

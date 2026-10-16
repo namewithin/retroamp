@@ -15,7 +15,13 @@ import ObjectiveC
         let value=unsafeBitCast(method_getImplementation(method),to:Getter.self)(web,selector)
         return value>0 ? value:nil
     }
-    func reply(_ id:Int,_ result:[String:Any]=[:],error:String?=nil){var value:[String:Any]=["id":id,"result":result];if let error{value["error"]=error};writer.send(value)}
+    func reply(_ id:Int,_ result:[String:Any]=[:],error:String?=nil){
+        var value:[String:Any]=["id":id,"result":result];if let error{value["error"]=error}
+        let accepted=writer.send(value){[weak self] success in
+            if !success{Task{@MainActor [weak self]in await self?.shutdown()}}
+        }
+        if !accepted{Task{@MainActor [weak self]in await self?.shutdown()}}
+    }
     func applicationDidFinishLaunching(_ n:Notification) {
         guard CommandLine.arguments.contains("--controlled-stream")else{NSApp.terminate(nil);return}
         let config=WKWebViewConfiguration();config.websiteDataStore = .nonPersistent();config.mediaTypesRequiringUserActionForPlayback=[]
@@ -100,7 +106,10 @@ import ObjectiveC
     func shutdown()async {
         guard !closing else{return};closing=true;active=false
         let confirmed=try?await web.evaluateJavaScript("(()=>{window.__retroNativePipe=false;const media=[...document.querySelectorAll('video,audio')];media.forEach(v=>{v.muted=true;v.volume=0;v.pause()});return media.every(v=>v.muted&&v.volume===0&&v.paused)})()")
-        writer.send(["quiet":confirmed as?Bool==true]);web.stopLoading();NSApp.terminate(nil)
+        writer.send(["quiet":confirmed as?Bool==true]);web.stopLoading()
+        // Do not exit before the final quiet acknowledgement has left the async writer.
+        await withCheckedContinuation{(ready:CheckedContinuation<Void,Never>)in writer.close{ready.resume()}}
+        NSApp.terminate(nil)
     }
     func webView(_ webView:WKWebView,didCommit navigation:WKNavigation!){documentGeneration+=1;active=false}
     func webView(_ webView:WKWebView,didFinish navigation:WKNavigation!){initialDocumentReady=true}

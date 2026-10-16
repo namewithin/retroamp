@@ -53,7 +53,10 @@ enum CDPFailure:LocalizedError {
         };defer{watchdog.cancel()}
         return try await withCheckedThrowingContinuation{waiting in
             pending[id]=waiting
-            if !writer.send(value){pending.removeValue(forKey:id)?.resume(throwing:MusicError.message("Канал WebKit закрито."));close()}
+            let accepted=writer.send(value){[weak self] success in
+                if !success{Task{@MainActor [weak self]in self?.close()}}
+            }
+            if !accepted{pending.removeValue(forKey:id)?.resume(throwing:MusicError.message("Канал WebKit закрито."));close()}
         }
     }
     @inline(never) func evaluate(_ expression:String)async throws->[String:Any] {
